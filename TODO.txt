@@ -260,11 +260,23 @@ Future work for Claude/rangesolver
   overall rate, ETA (see the progress-rate/ETA idea above), counts of
   unsearched/assigned/completed ranges, number of active clients, etc.
 
-  Stretch idea: since browser clients here would just be spectators
-  showing progress rather than doing any searching themselves, it
-  might be worth compiling the C++ solver to WebAssembly (e.g. via
-  emscripten) so a browser tab could actually be a worker too -
-  turning "watch the search on a laptop" into "contribute a laptop's
-  idle CPU to the search," with zero install beyond opening a page.
-  More ambitious than the spectator view; worth treating as separate,
-  optional follow-on work rather than bundling it into a first version.
+  Participation, not just spectating: the goal is for the browser
+  client to actually help search, not just watch - compile the C++
+  solver to WebAssembly (e.g. via emscripten) so a browser tab can
+  request a range from the server, search it itself in a Web Worker
+  (keeping the page responsive), and report progress/solutions back
+  the same way a native client would. "Contribute a laptop's idle CPU
+  to the search" with zero install beyond opening a page.
+  Make this opt-in, controlled by UI in the page itself (e.g. a
+  toggle/button - "Contribute my computer's spare cycles" - off by
+  default so someone who just wants to watch isn't unexpectedly
+  spinning up their CPU/fan/battery). While off, the page behaves as
+  pure spectator, just rendering whatever the server reports; while
+  on, it also requests and works ranges like any other client.
+  This is more involved than the pure-spectator view (needs the WASM
+  build of the solver working before it's useful), so it's fine for
+  a first version to ship spectating only and add the participate
+  toggle once that path is proven out - but the UI and protocol
+  should be designed with this in mind from the start (e.g. the
+  server shouldn't need to know or care whether a given client is
+  native, a participating browser tab, or a spectating browser tab).
