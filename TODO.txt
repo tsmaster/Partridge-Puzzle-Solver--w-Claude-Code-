@@ -84,3 +84,35 @@ Future work for Claude/rangesolver
   If solution metadata beyond the hash is ever wanted (e.g. which
   --start/--end range or worker found it, when), add columns for that
   at the same time rather than needing a schema migration later.
+
+- Progress rate / ETA estimation: observe how fast solutions are being
+  found and predict how long it will take to finish the current run.
+  Two complementary estimators, since they have different strengths:
+
+  A) Tree-fraction estimator (model-free, works for any --start/--end
+     range, full or partial): at each depth, we know which branch
+     (tile size) we're currently exploring out of how many were tried
+     at that node (i.e. how many sizes were legal/available there).
+     Accumulate a running "fraction of this node's siblings completed
+     so far" the way Knuth's classic backtracking-tree-size estimator
+     does, refining as we go deeper. This gives a continuously
+     improving estimate of what fraction of the *current* search range
+     has been completed, independent of any assumption about the total
+     solution count, so it works even for an arbitrary prefix range.
+     ETA = elapsed_time / fraction_done * (1 - fraction_done).
+
+  B) Target-count extrapolation (only valid for a full, unrestricted
+     run): use solutions_found_so_far / elapsed_time as a rate, and
+     divide the remaining count (target_total - solutions_found) by
+     that rate. notes.txt cites Matt Parker's figure of 1,730,280 total
+     solutions (352,072 "L" + 1,303,584 "I" + 74,624 other) as a rough
+     target for this. Caveat: notes.txt also records that our own
+     nsolver run on the n=8 sub-case didn't match Parker's claimed L
+     solution counts, so treat 1,730,280 as an unverified rough
+     finish line, not a confirmed authoritative total, until that
+     discrepancy is understood - surface it as an estimate with a
+     visible "unverified target" caveat rather than a hard countdown.
+
+  The two could be shown side by side in the periodic status line
+  once solutions_found is nonzero, or (A) alone when running a
+  partial range where (B) doesn't apply.
