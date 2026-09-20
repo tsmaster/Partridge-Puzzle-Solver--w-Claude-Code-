@@ -64,3 +64,23 @@ Future work for Claude/rangesolver
   similar) flag so PRINT_DELAY doesn't have to be a hardcoded 3.0s
   constant. Useful for quieter long/background runs (larger delay) or
   tighter monitoring while tuning a small range (smaller delay).
+
+- Store found solutions in a lightweight database instead of (or in
+  addition to) the ASCII soln_log_*.txt files, to make deduplication
+  and querying easy across many runs. Use SQLite, not MySQL: MySQL is
+  a client-server database (needs a running daemon, user accounts, a
+  network protocol) which is the opposite of lightweight, whereas
+  SQLite is a single file, needs no server, and is trivial to query
+  from the command line, Python, or C/C++. A "solutions" table with
+  the hash as a UNIQUE TEXT column gets deduplication for free via
+  INSERT OR IGNORE.
+  Likely design: keep rangesolver writing the ASCII logs as it does
+  today (simple, safe for many parallel processes writing to separate
+  files, no new dependency in the C++ solver), and add a small Python
+  ingestion script under tools/ that reuses solution.py's hashing to
+  scan one or more soln_log_*.txt files and upsert their hashes into a
+  shared solutions.db. Keeps rangesolver.cpp dependency-free while
+  giving a single place to dedupe/count/query results from all runs.
+  If solution metadata beyond the hash is ever wanted (e.g. which
+  --start/--end range or worker found it, when), add columns for that
+  at the same time rather than needing a schema migration later.
