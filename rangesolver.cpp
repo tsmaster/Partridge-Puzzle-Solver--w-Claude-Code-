@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <unistd.h>
 #include <chrono>
 #include <string>
 #include <vector>
@@ -12,6 +13,8 @@ auto g_start_time = std::chrono::steady_clock::now();
 auto g_last_print_time = g_start_time;
 long long g_solutions_found = 0;
 std::string g_log_filename = "Solutions/soln_log_range.txt";
+bool g_inplace_status = false;   // overwrite each status line instead of scrolling
+bool g_printed_status = false;   // whether any status line has been printed yet
 
 class Grid
 {
@@ -174,9 +177,21 @@ void print_progress_if_due(int depth) {
   std::chrono::duration<double> since_last = now - g_last_print_time;
   if (since_last.count() > PRINT_DELAY) {
     std::chrono::duration<double> elapsed = now - g_start_time;
-    printf("[t=%.1fs] depth=%2d solutions=%lld path=%s\n",
-           elapsed.count(), depth, g_solutions_found, path_to_string(depth).c_str());
+    std::string line;
+    char header[64];
+    snprintf(header, sizeof(header), "[t=%.1fs] depth=%2d solutions=%lld path=",
+              elapsed.count(), depth, g_solutions_found);
+    line = std::string(header) + path_to_string(depth);
+
+    if (g_inplace_status) {
+      // \r returns to column 0; \033[K then clears to end of line so a shorter line doesn't
+      // leave trailing characters from a longer previous one.
+      printf("\r\033[K%s", line.c_str());
+    } else {
+      printf("%s\n", line.c_str());
+    }
     fflush(stdout);
+    g_printed_status = true;
     g_last_print_time = now;
   }
 }
@@ -273,7 +288,7 @@ void full_solver(PieceSet* remain, int depth, bool lower_tight, bool upper_tight
 }
 
 void print_usage(const char* prog) {
-  printf("Usage: %s [--start=DIGITS] [--end=DIGITS] [--log=FILE]\n", prog);
+  printf("Usage: %s [--start=DIGITS] [--end=DIGITS] [--log=FILE] [--status=MODE]\n", prog);
   printf("\n");
   printf("  DIGITS is a string of 1-45 characters, each '1'-'9', giving the tile size\n");
   printf("  placed at each successive raster-scan position (the same format produced\n");
@@ -288,11 +303,17 @@ void print_usage(const char* prog) {
   printf("\n");
   printf("  --log overrides the output file solutions are appended to (default: %s).\n",
          g_log_filename.c_str());
+  printf("\n");
+  printf("  --status controls how periodic progress lines are printed: 'inplace'\n");
+  printf("  overwrites the previous line (tidy for an interactive terminal), 'scroll'\n");
+  printf("  prints each on its own line (better when output is redirected to a file\n");
+  printf("  or viewed by another process). Default: inplace when stdout is a terminal,\n");
+  printf("  scroll otherwise.\n");
 }
 
 int main(int argc, char** argv) {
-  std::string start_str, end_str;
-  bool have_start = false, have_end = false;
+  std::string start_str, end_str, status_str;
+  bool have_start = false, have_end = false, have_status = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -307,12 +328,21 @@ int main(int argc, char** argv) {
       have_end = true;
     } else if (arg.rfind("--log=", 0) == 0) {
       g_log_filename = arg.substr(6);
+    } else if (arg.rfind("--status=", 0) == 0) {
+      status_str = arg.substr(9);
+      have_status = true;
     } else {
       fprintf(stderr, "Unrecognized argument: %s\n\n", arg.c_str());
       print_usage(argv[0]);
       return 1;
     }
   }
+
+  if (have_status && status_str != "inplace" && status_str != "scroll") {
+    fprintf(stderr, "Invalid --status value '%s': expected 'inplace' or 'scroll'\n", status_str.c_str());
+    return 1;
+  }
+  g_inplace_status = have_status ? (status_str == "inplace") : (isatty(fileno(stdout)) != 0);
 
   std::vector<int> start_digits, end_digits;
   if (have_start && !parse_digit_string(start_str, start_digits)) {
@@ -329,10 +359,11 @@ int main(int argc, char** argv) {
   }
 
   printf("Welcome to CppSolver/Claude rangesolver\n");
-  printf("start=%s end=%s log=%s\n",
+  printf("start=%s end=%s log=%s status=%s\n",
          have_start ? start_str.c_str() : "(none)",
          have_end ? end_str.c_str() : "(none)",
-         g_log_filename.c_str());
+         g_log_filename.c_str(),
+         g_inplace_status ? "inplace" : "scroll");
 
   g_grid.init_blank();
   PieceSet init_piece_set;
@@ -343,6 +374,9 @@ int main(int argc, char** argv) {
 
   full_solver(&init_piece_set, 0, have_start, have_end, start_digits, end_digits, 0, 0);
 
+  if (g_inplace_status && g_printed_status) {
+    printf("\n");
+  }
   std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - g_start_time;
   printf("Done. %lld solution(s) found in %.1fs.\n", g_solutions_found, elapsed.count());
   return 0;
