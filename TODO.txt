@@ -228,3 +228,43 @@ Future work for Claude/rangesolver
     the subprocess approach keeps the network/orchestration code
     (probably Python, like the rest of tools/) decoupled from the
     performance-critical C++ search.
+
+- Browser-based client, as an alternative front end to the
+  client/server system above. The server machine would need to also
+  run a small web server; browser clients on the LAN would load a
+  page from it and connect for live updates. Candidates: a small
+  vanilla JS page drawing to a <canvas> (simplest - no build step,
+  trivially served as a static file, lightweight for a fast-moving
+  hobby project), or a Godot project exported to web (a real 2D
+  engine, nicer if the visualization grows more elaborate/animated,
+  at the cost of a build/export pipeline). Lean toward vanilla JS
+  first unless the visuals want to get considerably richer.
+
+  Discovery/protocol differences from the native client noted above:
+  - Browsers can't send raw UDP broadcasts or open arbitrary TCP
+    sockets, so the earlier discovery mechanism doesn't carry over as
+    is. Simplest path: the user just navigates to the server's
+    address directly (bookmark or mDNS/Bonjour name like
+    partridge.local instead of a raw IP, so they don't have to look
+    up the IP each time). Real-time updates then go over WebSocket
+    rather than a plain TCP socket.
+  - Worth considering unifying on WebSocket+JSON as the one protocol
+    for both native and browser clients (a native client can speak
+    WebSocket too), rather than maintaining a separate TCP wire
+    format for native and a WebSocket one for the browser.
+
+  Display: reuse the same tile color scheme as solution.py's
+  save_to_png(), so the ASCII/PyGame/browser views all agree visually.
+  Show the colored solution grid for whatever's most recently found
+  or in progress, plus running stats aggregated by the server -
+  overall rate, ETA (see the progress-rate/ETA idea above), counts of
+  unsearched/assigned/completed ranges, number of active clients, etc.
+
+  Stretch idea: since browser clients here would just be spectators
+  showing progress rather than doing any searching themselves, it
+  might be worth compiling the C++ solver to WebAssembly (e.g. via
+  emscripten) so a browser tab could actually be a worker too -
+  turning "watch the search on a laptop" into "contribute a laptop's
+  idle CPU to the search," with zero install beyond opening a page.
+  More ambitious than the spectator view; worth treating as separate,
+  optional follow-on work rather than bundling it into a first version.
