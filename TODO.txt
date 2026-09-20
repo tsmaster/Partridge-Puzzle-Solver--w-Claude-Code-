@@ -59,3 +59,8 @@ Future work for Claude/rangesolver
     resulting solutions, derive it the way solution.py does (sort
     placed corners by raster position after the fact) rather than
     from insertion order.
+
+- Configurable progress print delay: add a --print-delay=SECONDS (or
+  similar) flag so PRINT_DELAY doesn't have to be a hardcoded 3.0s
+  constant. Useful for quieter long/background runs (larger delay) or
+  tighter monitoring while tuning a small range (smaller delay).
