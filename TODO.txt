@@ -166,3 +166,65 @@ Future work for Claude/rangesolver
     a "demo reel" viewing mode.
   - Keep the pygame event loop responsive (handle window close/resize)
     between polls rather than blocking on file I/O.
+
+- Client/server distributed search (bigger feature). A server hands
+  out --start/--end ranges to worker clients on the LAN; clients
+  search their assigned range with rangesolver's algorithm and report
+  solutions and progress back; the server tracks what's unsearched,
+  what's assigned-but-unconfirmed, and what's done.
+
+  Server responsibilities:
+  - Maintain three buckets of range state: unsearched, assigned
+    (with a deadline), and completed. The initial unsearched set comes
+    from the partition helper noted above (a list of --start/--end
+    pairs that tile the whole search space).
+  - On a client request, pop a range from unsearched, move it to
+    assigned with a timeout, and hand it out.
+  - Accept periodic progress reports from clients working an assigned
+    range (their current "path=" position within the range, plus any
+    solutions found since the last report) and persist solutions as
+    they arrive - natural fit for the SQLite-backed storage noted
+    above, with the server as the single writer instead of needing a
+    separate merge step.
+  - On a completion report, move the range to completed. On a timeout
+    with no completion, don't just requeue the whole original range:
+    use the client's last reported path as a new lower bound, and
+    requeue only [last_reported_path, original_end] as unsearched -
+    this is the "reduce outstanding work" part, avoiding redoing
+    ground the client already covered. A range that times out with no
+    progress reports at all just goes back to unsearched unchanged.
+  - Should be able to report aggregate stats (unsearched / assigned /
+    completed range counts, solutions found, combined rate across all
+    clients) - ties into the progress-rate/ETA estimation idea above,
+    and is a much better place to compute it than any single client.
+
+  Client responsibilities:
+  - Discovery: broadcast a small UDP packet (with a recognizable
+    magic string, so random LAN broadcast noise doesn't trigger a
+    false match) to the LAN broadcast address on a well-known port;
+    the server listens there and replies unicast with its TCP
+    host:port. Handle the no-response case (retry a few times, then
+    give up with an error) and the unlikely multiple-servers-replied
+    case. Also support a --server=IP[:PORT] flag to skip discovery
+    and connect directly, for cases where broadcast doesn't reach
+    (different subnet, broadcast disabled, etc).
+  - Everything after discovery (requesting a range, reporting progress
+    and solutions, reporting completion) goes over a plain TCP
+    connection - UDP is only for the discovery step.
+  - Run the assigned range using the existing solver logic (either by
+    invoking rangesolver as a subprocess and parsing its output, or by
+    linking the search directly into the client) and send progress
+    reports at some interval (reusing the same path/depth/solutions
+    info rangesolver already prints), batching any newly-found
+    solutions in with each report rather than opening a new message
+    per solution.
+
+  Protocol notes (to pin down during implementation, not now):
+  - A simple line- or length-delimited JSON message format over TCP
+    is almost certainly enough given how small and infrequent these
+    messages are - no need for a binary protocol.
+  - Decide whether the client is a thin wrapper around a rangesolver
+    subprocess or a single binary with the network layer built in;
+    the subprocess approach keeps the network/orchestration code
+    (probably Python, like the rest of tools/) decoupled from the
+    performance-critical C++ search.
