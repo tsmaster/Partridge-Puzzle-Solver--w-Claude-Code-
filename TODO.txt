@@ -116,3 +116,26 @@ Future work for Claude/rangesolver
   The two could be shown side by side in the periodic status line
   once solutions_found is nonzero, or (A) alone when running a
   partial range where (B) doesn't apply.
+
+- Merge/dedupe tool (Python, likely tools/merge_solutions.py): take a
+  list of input filenames, accepting glob-style wildcards (e.g.
+  "Solutions/soln_log_*.txt"; expand them internally with glob() as
+  well as accepting whatever the shell already expanded, so a single
+  quoted pattern works even for more files than ARG_MAX would allow),
+  read every solution block out of each file (same 45-consecutive-
+  45-char-lines scan as splitlog.py), and hash each with solution.py's
+  get_hash(). Dedupe by hash (first occurrence wins; a hash collision
+  between two visually different grids would indicate a bug - worth
+  a sanity check/warning if the raw text differs for the same hash).
+  Write the unique solutions to a single output file, in decreasing
+  hash order - since digit 9 sorts after digit 1 as a plain string/
+  numeric comparison, sorting hashes descending reproduces the order
+  solutions are naturally discovered by the solvers (largest remaining
+  tile tried first at each position), so the merged file reads the
+  same way a single from-scratch run's log would.
+  Implementation note: for the eventual full corpus (~1.7 million
+  solutions across many parallel workers' output files), holding
+  every full 45-line ASCII block in memory at once could be a few GB;
+  if that matters, only keep (hash, source file, byte offset) triples
+  in memory, sort those by hash, and stream each block from disk to
+  the output file in that order rather than holding all the text.
