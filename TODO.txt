@@ -139,3 +139,30 @@ Future work for Claude/rangesolver
   if that matters, only keep (hash, source file, byte offset) triples
   in memory, sort those by hash, and stream each block from disk to
   the output file in that order rather than holding all the text.
+
+- Live graphical viewer (Python, likely tools/live_view.py), to
+  replace watching `tail -f` on a solution log in a console: a PyGame
+  window that periodically checks a soln_log*.txt file for new data,
+  parses the latest complete solution block, and draws it to the
+  window - basically solution.py's save_to_png() rendering (same
+  colors/PieceLocation logic), but blitting to a pygame.Surface
+  instead of writing a PNG to disk each time.
+  Needs pygame added as a new tools/ dependency (not currently listed
+  in pyproject.toml; solution.py's PNG export only needs Pillow).
+  Implementation notes:
+  - Poll by checking the file's size/mtime (e.g. every 0.5-1s) before
+    re-reading, rather than busy-reading the whole file every frame;
+    for a log that eventually holds ~1.7 million solutions, track the
+    last-read byte offset and only scan newly appended bytes for
+    complete blocks (same 45-consecutive-45-char-line scan as
+    splitlog.py) rather than rescanning from the top of the file.
+  - Only treat a block as complete once its trailing "---" delimiter
+    has also been fully written, to avoid a race where 45 lines look
+    complete but the writer is still mid-flush.
+  - If multiple new solutions have appeared since the last poll
+    (solving faster than the display refresh), default to showing
+    only the latest one rather than queuing a backlog; could offer a
+    flag later to instead step through every new one in sequence for
+    a "demo reel" viewing mode.
+  - Keep the pygame event loop responsive (handle window close/resize)
+    between polls rather than blocking on file I/O.
