@@ -540,3 +540,30 @@ the exact same default path a real, independently-running background
 search (started outside this conversation) was also writing to at the
 time - confirmed still healthy afterward, but avoidable entirely by
 just not sharing a filename with real runs in the first place.
+
+- Periodic status-via-SMS script (Python, tools/, run via cron ~4x/day
+  - e.g. `0 */6 * * *`): collect all found solutions (CppSolver/
+  Solutions + Claude/Solutions), merge/dedupe (reuse the merge script
+  above rather than a third copy of the same logic), count uniques,
+  and text the current count to a phone via SMS.
+  Fancier version: also take the lowest-hash solution (the current
+  "high water mark" per the note above) and render it to an image
+  (reuse solution.py's save_to_png()), sending that as an MMS.
+  Implementation notes:
+  - Sending SMS/MMS from a script needs an external provider (e.g.
+    Twilio, AWS SNS) and an account/API credentials - those
+    credentials (and the phone number) must NOT be committed to the
+    repo; use environment variables or an untracked local config file
+    instead.
+  - Cron job setup (the crontab entry itself) is separate from the
+    script - the script should be runnable and testable standalone
+    first.
+  - Worth persisting the previous run's count to a small local state
+    file so each message can report "X new since last check" (and,
+    combined with the time between runs, a rough interim rate) rather
+    than just a static total - complements the progress-rate/ETA idea
+    above with a periodic real-world data point instead of only a
+    live process's own self-reported rate.
+  - Consider whether to send every scheduled run regardless, or only
+    when the count has actually changed, to avoid four identical
+    "no new solutions" texts a day during a slow stretch.
