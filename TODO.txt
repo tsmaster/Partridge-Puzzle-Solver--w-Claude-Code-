@@ -429,3 +429,61 @@ Future work for Claude/rangesolver
     multi-threaded WASM instance (pthreads), since the ranges are
     already embarrassingly parallel and this avoids needing
     SharedArrayBuffer's cross-origin-isolation deployment requirements.
+
+- Bitboard/bitmask row representation. FRAME_WIDTH is 45, which fits
+  in a single 64-bit word per row. Representing each row as a uint64_t
+  occupancy bitmask turns can_place_piece_at_location's nested
+  size x size loop into `size` bitwise ANDs against a precomputed,
+  shifted mask, and insert/remove into `size` single ORs/AND-NOTs
+  instead of size^2 individual cell writes. Would also speed up the
+  largest-empty-square DP and flood-fill dead-space checks noted
+  above. No traversal-order or hash-compatibility concerns - purely an
+  internal representation change. Probably the single biggest
+  remaining implementation-level speedup available.
+
+- Zobrist-hash transposition table for proven-dead states. It's
+  plausible that different placement sequences arrive at the identical
+  (occupied-region shape, remaining-piece-counts) state - if so,
+  caching "this state has zero completions" and checking it via an
+  incrementally-maintained hash (XOR in/out per placement/removal,
+  O(1) per move) could skip large swaths of redundant dead-end
+  exploration, the same way a chess engine's transposition table
+  avoids re-deriving an already-refuted position. Real memory cost and
+  implementation complexity, and genuinely uncertain payoff until
+  measured - worth investigating whether state recurrence is actually
+  common enough to pay for itself before committing to it. Doesn't
+  change traversal order or which solutions get found, only skips
+  redundant dead-branch exploration, so no compatibility concerns.
+
+- Forced-placement lookahead (from optimizations.txt's Gemini
+  suggestions, item 5 - never logged here until now): if a remaining
+  piece has exactly one legal location left anywhere on the board,
+  place it immediately rather than waiting for raster order to reach
+  it. Same caveat as the min-span heuristic above: this changes
+  traversal order, breaking hash/--start/--end compatibility, so it'd
+  need the same "separate variant" treatment as that heuristic rather
+  than being folded into rangesolver directly.
+
+- Symmetry reduction. The board has 8-fold dihedral symmetry
+  (4 rotations x 2 reflections), and notes.txt already distinguishes
+  "1,730,280 with symmetry" from "216,285 unique." If the goal ever
+  shifts to just the unique count, searching only a canonical
+  orientation and generating the other <=7 by simple grid transform
+  instead of full re-search could cut total required work by close to
+  8x. Bigger and riskier than the other ideas here - needs a correct
+  canonical-form/tie-breaking rule to decide which orientation is
+  "the" canonical one, and it changes what count the progress-rate/ETA
+  estimation idea above is chasing (216,285 instead of 1,730,280) -
+  but potentially the largest win on this list if it's ever the actual
+  goal rather than the full symmetric count.
+
+- Keep the solution log file open for the whole run. log_to_file
+  currently does fopen/fclose on every single solution found - a
+  real, if probably small, per-solution syscall cost that adds up
+  once solutions come frequently in a dense subtree. Easy fix: open
+  once at startup, write and flush per solution, close at the end.
+
+- Compiler/build flags. Currently just -O2. Trying -O3 -march=native
+  (and possibly -flto, or profile-guided optimization given how
+  long-running this program is) costs nothing but a rebuild and could
+  be a free percentage speedup.
