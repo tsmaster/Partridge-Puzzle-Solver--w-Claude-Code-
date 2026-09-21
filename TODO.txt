@@ -170,9 +170,21 @@ Future work for Claude/rangesolver
   constant. Useful for quieter long/background runs (larger delay) or
   tighter monitoring while tuning a small range (smaller delay).
 
-- Store found solutions in a lightweight database instead of (or in
-  addition to) the ASCII soln_log_*.txt files, to make deduplication
-  and querying easy across many runs. Use SQLite, not MySQL: MySQL is
+- [HIGH PRIORITY] Store found solutions in a lightweight database
+  instead of (or in addition to) the ASCII soln_log_*.txt files, to
+  make deduplication and querying easy across many runs.
+  Bumped to high priority after checking whether dashboard.py's
+  periodic full-corpus rescan was being slowed down by duplicate
+  solutions across files - it wasn't (31 duplicates out of 75,018
+  blocks scanned, 0.04%, from a couple of known/harmless leftover
+  test files and intentional boundary slivers in bootstrap_ranges.py's
+  gap computation). The real and growing cost is file count and total
+  size: every rescan re-reads and re-parses every solution file from
+  scratch regardless of duplicates, and that file count is headed
+  toward as many as 52,535 (one per range) as workers keep finishing
+  ranges. This is exactly the problem a real database (vs. re-scanning
+  text files every time) solves.
+  Use SQLite, not MySQL: MySQL is
   a client-server database (needs a running daemon, user accounts, a
   network protocol) which is the opposite of lightweight, whereas
   SQLite is a single file, needs no server, and is trivial to query
