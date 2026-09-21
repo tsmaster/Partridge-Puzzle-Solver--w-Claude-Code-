@@ -477,13 +477,9 @@ Future work for Claude/rangesolver
   but potentially the largest win on this list if it's ever the actual
   goal rather than the full symmetric count.
 
-- Keep the solution log file open for the whole run. log_to_file
-  currently does fopen/fclose on every single solution found - a
-  real, if probably small, per-solution syscall cost that adds up
-  once solutions come frequently in a dense subtree. Easy fix: open
-  once at startup, write and flush per solution, close at the end.
+- [DONE] Keep the solution log file open for the whole run - now opened
+  once at startup, written and flushed per solution, closed at the end.
 
-- Compiler/build flags. Currently just -O2. Trying -O3 -march=native
-  (and possibly -flto, or profile-guided optimization given how
-  long-running this program is) costs nothing but a rebuild and could
-  be a free percentage speedup.
+- [DONE] Compiler/build flags - now -O3 -march=native (LTO/PGO still
+  not done - single translation unit, and PGO's bigger workflow change
+  respectively - could revisit either later if useful).
