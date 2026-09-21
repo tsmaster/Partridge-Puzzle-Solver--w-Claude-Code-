@@ -108,10 +108,30 @@ Future work for Claude/rangesolver
   four-nines-plus-eight example showed, a small/shallow dead pocket
   (like a 1x7 strip) is already caught almost for free by the existing
   logic one level later, so the real win is for larger, deeper
-  isolated pockets discovered many levels down. (B)'s DP is a single
-  O(45x45) pass and directly answers a question (largest placeable
-  piece) that's otherwise easy to get wrong with a cheaper heuristic,
-  so it's likely worth it more often than (A) is.
+  isolated pockets discovered many levels down.
+
+  [TRIED AND REVERTED, 2026-09-20] (B) was implemented as a plain
+  scalar per-cell DP, gated to only run when the largest remaining
+  piece size was >= 6 (to skip it once only small pieces were left).
+  Measured on the standard shared-prefix test subtree used throughout
+  this file's checks (both with and without gating - the gate barely
+  changed anything, since a large size with several copies can stay
+  "the largest remaining size" for most of the search, not just early
+  on): baseline 3,451,602 nodes in 0.168s (~48.6ns/node) vs. with the
+  check, 2,794,770 nodes in 6.6s (~2,367ns/node) - a ~39x slowdown
+  overall. Instrumentation confirmed the check does real work (fired
+  on 2,794,705 of 2,794,770 nodes, actually pruning 368,352 of those,
+  cutting node count by ~19%) - it's not a no-op, it's just far too
+  expensive per call for what it prunes here: pruned subtrees averaged
+  only ~1.78 nodes saved each, i.e. it's mostly catching dead ends
+  just 1-2 levels deep on this workload, not many-levels-deep ones.
+  For this to pay off, the DP itself likely needs to be ~25-50x
+  cheaper (a genuinely bitwise/row-vectorized version instead of a
+  scalar 2025-cell loop, given bitboard rows already exist) rather
+  than gating by piece size, which didn't meaningfully reduce how
+  often it ran. Left un-reimplemented for now; revisit only with a
+  concrete plan for a much cheaper DP, and re-run this same controlled
+  benchmark before trusting any new attempt.
 
 - Arbitrary partial-solution seeding: a second way to specify a
   starting point, alongside the --start/--end digit-prefix hash,
