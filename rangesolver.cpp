@@ -16,6 +16,7 @@ const uint64_t WIDTH_MASK = (uint64_t(1) << FRAME_WIDTH) - 1; // bits 0..44 set
 auto g_start_time = std::chrono::steady_clock::now();
 auto g_last_print_time = g_start_time;
 long long g_solutions_found = 0;
+long long g_prefixes_found = 0;
 long long g_node_count = 0;
 std::string g_log_filename;
 bool g_inplace_status = false;   // overwrite each status line instead of scrolling
@@ -29,6 +30,19 @@ std::string default_log_filename() {
   localtime_r(&t, &tm_buf);
   char buf[64];
   std::strftime(buf, sizeof(buf), "Solutions/soln_log_range_%Y_%m_%d_%H_%M_%S.txt", &tm_buf);
+  return std::string(buf);
+}
+
+// Named and timestamped distinctly from default_log_filename() so it's never mistaken for a
+// file of complete solutions - this holds partial-path prefixes, not full 45-digit solutions.
+std::string default_prefixes_filename(int depth) {
+  std::time_t t = std::time(nullptr);
+  std::tm tm_buf;
+  localtime_r(&t, &tm_buf);
+  char time_buf[32];
+  std::strftime(time_buf, sizeof(time_buf), "%Y_%m_%d_%H_%M_%S", &tm_buf);
+  char buf[80];
+  snprintf(buf, sizeof(buf), "Solutions/prefixes_depth%d_%s.txt", depth, time_buf);
   return std::string(buf);
 }
 
@@ -164,7 +178,7 @@ std::string path_to_string(int depth) {
   return s;
 }
 
-void print_progress_if_due(int depth) {
+void print_progress_if_due(int depth, const char* count_label, long long count) {
   // Querying the clock on every single node is wasteful given how often this is called; only
   // do it once every CLOCK_CHECK_INTERVAL nodes, and rely on that batch of nodes being fast
   // relative to PRINT_DELAY so the status line still fires close to on schedule.
@@ -179,8 +193,8 @@ void print_progress_if_due(int depth) {
     std::chrono::duration<double> elapsed = now - g_start_time;
     std::string line;
     char header[64];
-    snprintf(header, sizeof(header), "[t=%.1fs] depth=%2d solutions=%lld path=",
-              elapsed.count(), depth, g_solutions_found);
+    snprintf(header, sizeof(header), "[t=%.1fs] depth=%2d %s=%lld path=",
+              elapsed.count(), depth, count_label, count);
     line = std::string(header) + path_to_string(depth);
 
     if (g_inplace_status) {
@@ -235,7 +249,7 @@ bool start_after_end(const std::vector<int>& start, const std::vector<int>& end)
 void full_solver(PieceSet* remain, int depth, bool lower_tight, bool upper_tight,
                   const std::vector<int>& start_digits, const std::vector<int>& end_digits,
                   int hint_x, int hint_y) {
-  print_progress_if_due(depth);
+  print_progress_if_due(depth, "solutions", g_solutions_found);
 
   if (remain->is_empty()) {
     ++g_solutions_found;
@@ -289,8 +303,70 @@ void full_solver(PieceSet* remain, int depth, bool lower_tight, bool upper_tight
   }
 }
 
+// Same traversal as full_solver, truncated at target_depth instead of running to a complete
+// solution: records every distinct prefix reached at that depth instead of continuing deeper.
+// remain can never be empty before target_depth is reached here, since exactly `depth` pieces
+// have been placed at that point and target_depth <= FRAME_WIDTH, so unlike full_solver there's
+// no is_empty() check - reaching target_depth is always the terminal condition. Honors the same
+// --start/--end bounds as full_solver, so this can enumerate prefixes within an existing range,
+// not just from the whole tree's root (useful later for splitting a range that's already
+// in progress rather than only the initial partition).
+void enumerate_prefixes(PieceSet* remain, int depth, int target_depth, bool lower_tight,
+                         bool upper_tight, const std::vector<int>& start_digits,
+                         const std::vector<int>& end_digits, int hint_x, int hint_y, FILE* out) {
+  print_progress_if_due(depth, "prefixes", g_prefixes_found);
+
+  if (depth == target_depth) {
+    ++g_prefixes_found;
+    fprintf(out, "%s\n", path_to_string(depth).c_str());
+    return;
+  }
+
+  if (lower_tight && depth >= (int)start_digits.size()) {
+    lower_tight = false;
+  }
+  if (upper_tight && depth >= (int)end_digits.size()) {
+    upper_tight = false;
+  }
+
+  int free_x, free_y;
+  g_grid.get_first_free_loc(hint_x, hint_y, free_x, free_y);
+
+  int lower_digit = lower_tight ? start_digits[depth] : 0;
+  int upper_digit = upper_tight ? end_digits[depth] : 0;
+
+  for (int sz = 9; sz > 0; --sz) {
+    if (remain->count[sz] < 1) {
+      continue;
+    }
+
+    bool next_lower_tight = lower_tight;
+    if (lower_tight) {
+      if (sz > lower_digit) continue;
+      if (sz < lower_digit) next_lower_tight = false;
+    }
+
+    bool next_upper_tight = upper_tight;
+    if (upper_tight) {
+      if (sz < upper_digit) continue;
+      if (sz > upper_digit) next_upper_tight = false;
+    }
+
+    if (g_grid.can_place_piece_at_location(sz, free_x, free_y)) {
+      g_path[depth] = sz;
+      g_grid.insert_piece_at_location(sz, free_x, free_y);
+      remain->count[sz]--;
+      enumerate_prefixes(remain, depth + 1, target_depth, next_lower_tight, next_upper_tight,
+                          start_digits, end_digits, free_x, free_y, out);
+      remain->count[sz]++;
+      g_grid.remove_piece_at_location(sz, free_x, free_y);
+    }
+  }
+}
+
 void print_usage(const char* prog) {
   printf("Usage: %s [--start=DIGITS] [--end=DIGITS] [--log=FILE] [--status=MODE]\n", prog);
+  printf("       %s --enumerate-depth=N [--start=DIGITS] [--end=DIGITS] [--out=FILE]\n", prog);
   printf("\n");
   printf("  DIGITS is a string of 1-45 characters, each '1'-'9', giving the tile size\n");
   printf("  placed at each successive raster-scan position (the same format produced\n");
@@ -312,11 +388,23 @@ void print_usage(const char* prog) {
   printf("  prints each on its own line (better when output is redirected to a file\n");
   printf("  or viewed by another process). Default: inplace when stdout is a terminal,\n");
   printf("  scroll otherwise.\n");
+  printf("\n");
+  printf("  --enumerate-depth=N switches to a different mode: instead of solving,\n");
+  printf("  list every distinct N-digit prefix reachable within [--start, --end]\n");
+  printf("  (the whole tree if omitted), one per line, in the same order they'd be\n");
+  printf("  visited (largest tile first). Each line is a ready-made --start=P --end=P\n");
+  printf("  pair covering one complete, disjoint unit of work - useful for splitting\n");
+  printf("  the search across processes/machines.\n");
+  printf("  --out overrides the output file the prefixes are written to (default:\n");
+  printf("  Solutions/prefixes_depth<N>_<timestamp>.txt - named and timestamped\n");
+  printf("  distinctly from the solution log so it's never mistaken for one).\n");
 }
 
 int main(int argc, char** argv) {
-  std::string start_str, end_str, status_str;
-  bool have_start = false, have_end = false, have_status = false, have_log = false;
+  std::string start_str, end_str, status_str, out_str;
+  bool have_start = false, have_end = false, have_status = false, have_log = false, have_out = false;
+  bool have_enumerate_depth = false;
+  int enumerate_depth = 0;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -332,9 +420,23 @@ int main(int argc, char** argv) {
     } else if (arg.rfind("--log=", 0) == 0) {
       g_log_filename = arg.substr(6);
       have_log = true;
+    } else if (arg.rfind("--out=", 0) == 0) {
+      out_str = arg.substr(6);
+      have_out = true;
     } else if (arg.rfind("--status=", 0) == 0) {
       status_str = arg.substr(9);
       have_status = true;
+    } else if (arg.rfind("--enumerate-depth=", 0) == 0) {
+      std::string depth_str = arg.substr(18);
+      char* end_ptr = nullptr;
+      long parsed = strtol(depth_str.c_str(), &end_ptr, 10);
+      if (depth_str.empty() || *end_ptr != '\0' || parsed < 1 || parsed > FRAME_WIDTH) {
+        fprintf(stderr, "Invalid --enumerate-depth value '%s': expected an integer 1-%d\n",
+                depth_str.c_str(), FRAME_WIDTH);
+        return 1;
+      }
+      enumerate_depth = (int)parsed;
+      have_enumerate_depth = true;
     } else {
       fprintf(stderr, "Unrecognized argument: %s\n\n", arg.c_str());
       print_usage(argv[0]);
@@ -362,6 +464,39 @@ int main(int argc, char** argv) {
                      "the requested range is likely empty.\n", start_str.c_str(), end_str.c_str());
   }
 
+  g_grid.init_blank();
+  PieceSet init_piece_set;
+  init_piece_set.init_full();
+
+  if (have_enumerate_depth) {
+    std::string out_filename = have_out ? out_str : default_prefixes_filename(enumerate_depth);
+    FILE* out_file = fopen(out_filename.c_str(), "w");
+    if (!out_file) {
+      fprintf(stderr, "Failed to open --out file '%s' for writing\n", out_filename.c_str());
+      return 1;
+    }
+
+    printf("Welcome to CppSolver/Claude rangesolver (--enumerate-depth mode)\n");
+    printf("depth=%d start=%s end=%s out=%s\n",
+           enumerate_depth,
+           have_start ? start_str.c_str() : "(none)",
+           have_end ? end_str.c_str() : "(none)",
+           out_filename.c_str());
+
+    g_start_time = std::chrono::steady_clock::now();
+    g_last_print_time = g_start_time;
+
+    enumerate_prefixes(&init_piece_set, 0, enumerate_depth, have_start, have_end,
+                        start_digits, end_digits, 0, 0, out_file);
+
+    fclose(out_file);
+
+    std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - g_start_time;
+    printf("Found %lld valid depth-%d prefix(es) in %.1fs.\n",
+           g_prefixes_found, enumerate_depth, elapsed.count());
+    return 0;
+  }
+
   if (!have_log) {
     g_log_filename = default_log_filename();
   }
@@ -377,10 +512,6 @@ int main(int argc, char** argv) {
          have_end ? end_str.c_str() : "(none)",
          g_log_filename.c_str(),
          g_inplace_status ? "inplace" : "scroll");
-
-  g_grid.init_blank();
-  PieceSet init_piece_set;
-  init_piece_set.init_full();
 
   g_start_time = std::chrono::steady_clock::now();
   g_last_print_time = g_start_time;
