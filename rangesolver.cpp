@@ -8,10 +8,12 @@
 
 const int FRAME_WIDTH = 45;
 const double PRINT_DELAY = 3.0;
+const long long CLOCK_CHECK_INTERVAL = 1024; // only query the clock every this many nodes
 
 auto g_start_time = std::chrono::steady_clock::now();
 auto g_last_print_time = g_start_time;
 long long g_solutions_found = 0;
+long long g_node_count = 0;
 std::string g_log_filename = "Solutions/soln_log_range.txt";
 bool g_inplace_status = false;   // overwrite each status line instead of scrolling
 bool g_printed_status = false;   // whether any status line has been printed yet
@@ -173,6 +175,14 @@ std::string path_to_string(int depth) {
 }
 
 void print_progress_if_due(int depth) {
+  // Querying the clock on every single node is wasteful given how often this is called; only
+  // do it once every CLOCK_CHECK_INTERVAL nodes, and rely on that batch of nodes being fast
+  // relative to PRINT_DELAY so the status line still fires close to on schedule.
+  ++g_node_count;
+  if (g_node_count % CLOCK_CHECK_INTERVAL != 0) {
+    return;
+  }
+
   auto now = std::chrono::steady_clock::now();
   std::chrono::duration<double> since_last = now - g_last_print_time;
   if (since_last.count() > PRINT_DELAY) {
