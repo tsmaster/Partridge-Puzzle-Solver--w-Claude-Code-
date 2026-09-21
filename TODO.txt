@@ -280,3 +280,23 @@ Future work for Claude/rangesolver
   should be designed with this in mind from the start (e.g. the
   server shouldn't need to know or care whether a given client is
   native, a participating browser tab, or a spectating browser tab).
+
+  Compiling to WASM: emscripten is the right tool - it lets rangesolver
+  .cpp's already-optimized, already-verified backtracking logic be
+  reused close to as-is, rather than risking a second implementation
+  (in JS, or a WASM-native language like Rust/AssemblyScript) drifting
+  out of sync with the native solver over time, and gets close to
+  native speed for this kind of tight, array-heavy loop.
+  - I/O needs to change: there's no real filesystem in the browser, so
+    replace the current fopen/fprintf solution logging with exported
+    JS callbacks instead (called on each solution found and each
+    progress update) rather than trying to parse a virtual log file.
+    This maps naturally onto what the client needs anyway - structured
+    per-event data rather than text to parse.
+  - Run each WASM instance inside a dedicated Web Worker so a long
+    search doesn't freeze the page's UI thread.
+  - For using multiple cores: prefer spinning up one independent
+    single-threaded WASM worker per range request over a single
+    multi-threaded WASM instance (pthreads), since the ranges are
+    already embarrassingly parallel and this avoids needing
+    SharedArrayBuffer's cross-origin-isolation deployment requirements.
