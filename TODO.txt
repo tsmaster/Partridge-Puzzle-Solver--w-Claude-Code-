@@ -50,40 +50,68 @@ Future work for Claude/rangesolver
   on. Would need either a new hash/ordering scheme for this variant,
   or to keep it as a separate solver that isn't range-bounded.
 
-- Flood-fill / "no isolates" dead-space check (from optimizations.txt's
-  Gemini suggestions - noted there but never carried over into this
-  TODO list until now). Before recursing into a placement, check
-  whether it creates an empty region that can never be tiled by the
-  pieces still available, and if so skip that branch immediately
-  instead of discovering the same dead end many levels deeper.
-  How it works: flood-fill the connected empty region(s) resulting
-  from a candidate placement, then check (a) area consistency - does
-  the region's cell count match some achievable combination of the
-  remaining pieces' sizes - and (b) a bottleneck check - the region's
-  narrowest dimension caps the largest piece that could ever go
-  anywhere in it, so if no remaining piece is small enough to fit
-  through that bottleneck, or the pieces small enough can't sum to
-  the region's area, it's dead. Concretely, this is the general form
-  of the four-nines-plus-eight example worked through in conversation:
-  placing an 8x8 next to four 9x9s along the top row leaves an
-  isolated 1-wide strip that only a 1x1 could ever occupy, and if
-  that strip is taller than 1 (or the single 1x1 piece is already
-  spent), the branch is dead before it's even tried further.
-  Unlike the min-span heuristic above, this does NOT change which
-  cell gets filled next or the traversal order - it only prunes
-  branches that could never succeed - so it stays fully compatible
-  with the raster-order hash and rangesolver's --start/--end bounds,
-  with none of that heuristic's compatibility caveat.
-  Performance tradeoff: a full flood-fill costs time on every node
-  (up to O(45x45) in the worst case), so it only pays for itself
-  against dead ends that are otherwise expensive to discover the slow
-  way. As the four-nines-plus-eight example showed, a small/shallow
-  dead pocket (like a 1x7 strip) is already caught almost for free by
-  the existing logic one level later, so the real win is for larger,
-  deeper isolated pockets discovered many levels down. Might be worth
-  a cheap approximate check first (e.g. just the new region's minimum
-  dimension against the smallest remaining piece) before paying for a
-  full flood-fill on every single node.
+- Dead-space checks (from optimizations.txt's Gemini suggestions -
+  noted there but never carried over into this TODO list until now).
+  Before recursing into a placement, check whether the remaining free
+  space and the remaining pieces are still mutually compatible, and
+  if not, skip that branch immediately instead of discovering the
+  same dead end many levels deeper. Two complementary sub-checks,
+  covering opposite failure directions:
+
+  A) Leftover-pocket check ("no isolates"): is some region of empty
+     space now too small, or too narrow, to be usefully filled by
+     what's left? Flood-fill the connected empty region(s) resulting
+     from a candidate placement, then check (a) area consistency -
+     does the region's cell count match some achievable combination
+     of the remaining pieces' sizes - and (b) a bottleneck check -
+     roughly, the region's narrowest dimension caps the largest piece
+     that could go in it, so if no remaining piece is small enough to
+     fit through that bottleneck, it's dead. This is the general form
+     of the four-nines-plus-eight example worked through in
+     conversation: placing an 8x8 next to four 9x9s along the top row
+     leaves an isolated 1-wide strip that only a 1x1 could ever
+     occupy, and if that strip is taller than 1 (or the single 1x1
+     piece is already spent), the branch is dead before it's even
+     tried further.
+     Caveat: a plain bounding-box/narrowest-dimension test is only an
+     approximation for irregularly-shaped regions (an L, a cross, a
+     zigzag corridor can have a bounding box far bigger than 9x9 while
+     containing no actual 9x9 square anywhere inside it), so it can
+     miss real dead ends (false negatives) rather than over-prune -
+     not incorrect, just weaker than it looks. Fine as a cheap first
+     pass; sub-check (B) below is the rigorous version of "can piece
+     size K fit somewhere in this region."
+
+  B) Required-piece check (the reverse direction, e.g. "we still have
+     a 9x9 to place, but does anywhere on the board actually fit one
+     anymore?"): compute, over the whole current free space, the size
+     of the largest axis-aligned all-empty square that exists anywhere
+     - the classic O(45x45) "largest square in a binary matrix" DP
+     (for each free cell, size = 1 + min(the same value at the cell
+     above, to the left, and above-left); the max value anywhere in
+     that table is the biggest piece that could still go somewhere).
+     If any remaining piece size (count[sz] > 0) is larger than that
+     maximum, it can never be placed again anywhere on the board - an
+     immediate, exact, and comparatively cheap way to prune the exact
+     "must place a 9x9 but nowhere fits" scenario, without the
+     bounding-box weakness sub-check (A) has.
+
+  Compatibility: unlike the min-span heuristic above, neither of these
+  changes which cell gets filled next or the traversal order - they
+  only prune branches that could never succeed - so both stay fully
+  compatible with the raster-order hash and rangesolver's --start/--end
+  bounds, with none of that heuristic's compatibility caveat.
+
+  Performance tradeoff: (A)'s flood-fill costs time on every node (up
+  to O(45x45) worst case), so it only pays for itself against dead
+  ends that are otherwise expensive to discover the slow way - as the
+  four-nines-plus-eight example showed, a small/shallow dead pocket
+  (like a 1x7 strip) is already caught almost for free by the existing
+  logic one level later, so the real win is for larger, deeper
+  isolated pockets discovered many levels down. (B)'s DP is a single
+  O(45x45) pass and directly answers a question (largest placeable
+  piece) that's otherwise easy to get wrong with a cheaper heuristic,
+  so it's likely worth it more often than (A) is.
 
 - Arbitrary partial-solution seeding: a second way to specify a
   starting point, alongside the --start/--end digit-prefix hash,
