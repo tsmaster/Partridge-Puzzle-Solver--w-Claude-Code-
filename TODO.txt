@@ -430,16 +430,23 @@ Future work for Claude/rangesolver
     already embarrassingly parallel and this avoids needing
     SharedArrayBuffer's cross-origin-isolation deployment requirements.
 
-- [HIGHEST PRIORITY, NOT STARTED] Bitboard/bitmask row representation. FRAME_WIDTH is 45, which fits
-  in a single 64-bit word per row. Representing each row as a uint64_t
-  occupancy bitmask turns can_place_piece_at_location's nested
-  size x size loop into `size` bitwise ANDs against a precomputed,
-  shifted mask, and insert/remove into `size` single ORs/AND-NOTs
-  instead of size^2 individual cell writes. Would also speed up the
-  largest-empty-square DP and flood-fill dead-space checks noted
-  above. No traversal-order or hash-compatibility concerns - purely an
-  internal representation change. Probably the single biggest
-  remaining implementation-level speedup available.
+- [DONE] Bitboard/bitmask row representation. Grid now stores one
+  uint64_t occupancy bitmask per row (FRAME_WIDTH=45 fits in 64 bits).
+  can_place/insert/remove_piece_at_location are O(size) row-mask ops
+  instead of O(size^2) per-cell loops, and get_first_free_loc uses
+  __builtin_ctzll for O(1)-per-row first-free-bit lookup. The per-cell
+  occ_size/occ_offset_x/occ_offset_y bookkeeping was dropped from the
+  hot path entirely - each placement's (x, y, size) is recorded into
+  parallel arrays at O(1) cost, and a found solution's ASCII art is
+  rendered by replaying those once, only when a solution completes,
+  rather than maintained incrementally on every node.
+  Verified against the existing single-leaf and shared-prefix
+  correctness checks (same solutions, same hashes). On the same
+  shared-prefix subtree used throughout this file's checks, wall time
+  dropped from ~0.5s to ~0.2s.
+  Still worth revisiting for the largest-empty-square DP and
+  flood-fill dead-space checks noted above, which weren't implemented
+  as part of this change but would build on the same bitmask rows.
 
 - Zobrist-hash transposition table for proven-dead states. It's
   plausible that different placement sequences arrive at the identical
