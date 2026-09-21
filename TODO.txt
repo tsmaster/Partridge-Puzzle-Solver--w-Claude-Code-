@@ -490,3 +490,14 @@ Future work for Claude/rangesolver
 - [DONE] Compiler/build flags - now -O3 -march=native (LTO/PGO still
   not done - single translation unit, and PGO's bigger workflow change
   respectively - could revisit either later if useful).
+
+Testing note (process, not a code change): always pass an explicit
+--log pointing to an obviously-a-test filename (e.g.
+Solutions/test_*.txt) when running ad hoc verification commands,
+unless the thing actually being tested is the default-filename
+behavior itself. Before the timestamped default was added, several
+rounds of test cleanup (`rm -f Solutions/soln_log_range.txt`) targeted
+the exact same default path a real, independently-running background
+search (started outside this conversation) was also writing to at the
+time - confirmed still healthy afterward, but avoidable entirely by
+just not sharing a filename with real runs in the first place.

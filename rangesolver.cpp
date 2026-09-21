@@ -2,10 +2,11 @@
 #include <unistd.h>
 #include <chrono>
 #include <cstdint>
-#include <string>
-#include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
+#include <string>
+#include <vector>
 
 const int FRAME_WIDTH = 45;
 const double PRINT_DELAY = 3.0;
@@ -16,9 +17,20 @@ auto g_start_time = std::chrono::steady_clock::now();
 auto g_last_print_time = g_start_time;
 long long g_solutions_found = 0;
 long long g_node_count = 0;
-std::string g_log_filename = "Solutions/soln_log_range.txt";
+std::string g_log_filename;
 bool g_inplace_status = false;   // overwrite each status line instead of scrolling
 bool g_printed_status = false;   // whether any status line has been printed yet
+
+// Timestamped so that running rangesolver again later doesn't append into (and visually
+// interleave with) a previous run's log by default; --log still overrides this outright.
+std::string default_log_filename() {
+  std::time_t t = std::time(nullptr);
+  std::tm tm_buf;
+  localtime_r(&t, &tm_buf);
+  char buf[64];
+  std::strftime(buf, sizeof(buf), "Solutions/soln_log_range_%Y_%m_%d_%H_%M_%S.txt", &tm_buf);
+  return std::string(buf);
+}
 
 // Occupancy only - one bit per cell, packed into a 64-bit word per row (FRAME_WIDTH=45 fits
 // comfortably). This is the hot path (checked/toggled on every trial placement at every node),
@@ -291,8 +303,9 @@ void print_usage(const char* prog) {
   printf("  space, e.g. to split work across processes/machines, or to resume a run\n");
   printf("  from a previously printed progress path.\n");
   printf("\n");
-  printf("  --log overrides the output file solutions are appended to (default: %s).\n",
-         g_log_filename.c_str());
+  printf("  --log overrides the output file solutions are appended to (default:\n");
+  printf("  Solutions/soln_log_range_<timestamp>.txt, timestamped at startup so\n");
+  printf("  repeated runs don't share, and interleave into, the same file).\n");
   printf("\n");
   printf("  --status controls how periodic progress lines are printed: 'inplace'\n");
   printf("  overwrites the previous line (tidy for an interactive terminal), 'scroll'\n");
@@ -303,7 +316,7 @@ void print_usage(const char* prog) {
 
 int main(int argc, char** argv) {
   std::string start_str, end_str, status_str;
-  bool have_start = false, have_end = false, have_status = false;
+  bool have_start = false, have_end = false, have_status = false, have_log = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -318,6 +331,7 @@ int main(int argc, char** argv) {
       have_end = true;
     } else if (arg.rfind("--log=", 0) == 0) {
       g_log_filename = arg.substr(6);
+      have_log = true;
     } else if (arg.rfind("--status=", 0) == 0) {
       status_str = arg.substr(9);
       have_status = true;
@@ -348,6 +362,9 @@ int main(int argc, char** argv) {
                      "the requested range is likely empty.\n", start_str.c_str(), end_str.c_str());
   }
 
+  if (!have_log) {
+    g_log_filename = default_log_filename();
+  }
   g_log_file = fopen(g_log_filename.c_str(), "a");
   if (!g_log_file) {
     fprintf(stderr, "Failed to open --log file '%s' for appending\n", g_log_filename.c_str());
