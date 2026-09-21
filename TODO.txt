@@ -221,6 +221,30 @@ Future work for Claude/rangesolver
     clients) - ties into the progress-rate/ETA estimation idea above,
     and is a much better place to compute it than any single client.
 
+  Range granularity - prefer adaptive/recursive splitting over a fixed
+  enumeration depth: a single fixed depth for the initial partition is
+  risky without measuring first. Early in the search, branching factor
+  per node is close to 9 (nearly every tile size is still available
+  and geometrically fits), so valid-prefix counts can grow close to
+  9^N - --enumerate-depth=10 could plausibly already be in the
+  billions, both too expensive to enumerate up front and far too many
+  units for the server to track. Going deep enough to fix the load-
+  imbalance problem outright (e.g. enumerating everything down to
+  depth 25) isn't much cheaper than just solving a large chunk of the
+  puzzle, since that's over half the tree.
+  Before picking any specific depth, actually run --enumerate-depth=N
+  for a few small N once it exists, to see empirically where the
+  prefix count starts exploding, rather than guessing.
+  Better than a fixed multi-layer scheme (e.g. always splitting at
+  depth 10, then again at depth 25): generalize the timeout-based
+  re-splitting above into on-demand splitting - a range too far from
+  its deadline, or requested by an idle worker, gets subdivided by
+  enumerating a few digits ahead of wherever the working client
+  currently is (same --enumerate-depth logic, just rooted at that
+  client's current position instead of the search root) and handing
+  out the resulting pieces. This sizes work units to the tree's actual
+  (very likely uneven) shape instead of a schedule of guessed depths.
+
   Client responsibilities:
   - Discovery: broadcast a small UDP packet (with a recognizable
     magic string, so random LAN broadcast noise doesn't trigger a
