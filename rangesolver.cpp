@@ -117,11 +117,10 @@ public:
     printf("---\n");
   }
 
-  void log_to_file(const char* filename) {
-    FILE* f = fopen(filename, "a");
-    if (!f) {
-      return;
-    }
+  // Writes to an already-open file handle rather than opening/closing one per call, since this
+  // runs once per solution found and re-opening the file each time is wasted syscall overhead
+  // once solutions start coming frequently.
+  void log_to_file(FILE* f) {
     for (int y = 0; y < FRAME_WIDTH; ++y) {
       char line[FRAME_WIDTH + 1];
       for (int x = 0; x < FRAME_WIDTH; ++x) {
@@ -137,12 +136,13 @@ public:
       fprintf(f, "%s\n", line);
     }
     fprintf(f, "---\n\n");
-    fclose(f);
+    fflush(f); // keep the file readable in real time (e.g. by `tail -f`) despite staying open
   }
 };
 
 Grid g_grid;
 int g_path[FRAME_WIDTH];
+FILE* g_log_file = nullptr;
 
 class PieceSet
 {
@@ -249,7 +249,7 @@ void full_solver(PieceSet* remain, int depth, bool lower_tight, bool upper_tight
 
   if (remain->is_empty()) {
     ++g_solutions_found;
-    g_grid.log_to_file(g_log_filename.c_str());
+    g_grid.log_to_file(g_log_file);
     return;
   }
 
@@ -368,6 +368,12 @@ int main(int argc, char** argv) {
                      "the requested range is likely empty.\n", start_str.c_str(), end_str.c_str());
   }
 
+  g_log_file = fopen(g_log_filename.c_str(), "a");
+  if (!g_log_file) {
+    fprintf(stderr, "Failed to open --log file '%s' for appending\n", g_log_filename.c_str());
+    return 1;
+  }
+
   printf("Welcome to CppSolver/Claude rangesolver\n");
   printf("start=%s end=%s log=%s status=%s\n",
          have_start ? start_str.c_str() : "(none)",
@@ -383,6 +389,8 @@ int main(int argc, char** argv) {
   g_last_print_time = g_start_time;
 
   full_solver(&init_piece_set, 0, have_start, have_end, start_digits, end_digits, 0, 0);
+
+  fclose(g_log_file);
 
   if (g_inplace_status && g_printed_status) {
     printf("\n");
