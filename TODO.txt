@@ -1,17 +1,36 @@
 Future work for Claude/rangesolver
 ===================================
 
-- Partition helper: a script (or rangesolver flag) that enumerates all
-  prefixes of a given length N (e.g. all valid N-digit paths reachable
-  from the root, respecting piece-count/geometry legality) and emits a
-  list of --start/--end pairs that exactly partition the full search
-  space, so work can be split across processes/machines without gaps
-  or overlaps.
+- Partition helper via a --enumerate-depth=N mode on rangesolver
+  itself (not a separate script): most N-digit strings aren't valid
+  prefixes (piece counts run out, or a tile doesn't fit there), so the
+  only correct way to find the valid ones is to replay the actual
+  search - Grid + PieceSet + get_first_free_loc - down to depth N and
+  record every node reached there, instead of continuing to depth 45.
+  That's just full_solver truncated at a fixed depth, so it belongs in
+  rangesolver.cpp itself rather than a second implementation of the
+  placement logic that could drift out of sync.
+  Output: one line per valid depth-N prefix. No need to pair adjacent
+  prefixes into ranges - since --start/--end already treat a shorter
+  string as an entire inclusive subtree (verified with the earlier
+  single-prefix tests), each individual depth-N prefix used as both
+  --start=P and --end=P is already one complete, disjoint unit of
+  work. Pick N so the prefix count comfortably exceeds the number of
+  workers/cores available.
+  This is also a prerequisite for the client/server system noted
+  below, not just a standalone tool: the server needs exactly this
+  enumeration to seed its initial "unsearched" pool, so building it
+  now is directly reusable later rather than throwaway work.
 
 - Parallel launcher: a wrapper (shell or python) that takes the
   partition list above and runs one rangesolver process per range
   (e.g. one per core), each logging to its own Solutions/soln_log_*.txt
   to avoid write contention, then merges the logs.
+  Treat this as a stopgap, not worth over-building: the client/server
+  system below replaces this whole manual-orchestration/merge workflow
+  with dynamic assignment and centralized storage, and also handles a
+  worker stalling or crashing mid-range, which a static "partition and
+  launch once" script has no story for at all.
 
 - Resume-from-checkpoint convenience: a flag to read a previously
   printed "path=" progress line directly (instead of retyping it as
