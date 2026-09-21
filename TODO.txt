@@ -279,6 +279,25 @@ Future work for Claude/rangesolver
   solutions and progress back; the server tracks what's unsearched,
   what's assigned-but-unconfirmed, and what's done.
 
+  Interim tool / relationship to gap-tracking: tools/ now has a script
+  that merges CppSolver/Solutions and Claude/Solutions files and
+  reports the lowest hash found as a "high water mark" to use as a
+  future --start. This is a fine simple heuristic for now, but it
+  isn't gap-safe: it assumes whatever's been run so far amounts to one
+  contiguous covered stretch, which isn't guaranteed once multiple
+  independent runs (or interrupted ones) are in the mix - some
+  genuinely unsearched territory could exist above the reported
+  low-water mark and get silently skipped forever if trusted blindly.
+  Decision: leave it as-is for now rather than building real
+  gap-tracking into the standalone tool, since the server above needs
+  to solve this properly anyway (real range bookkeeping - unsearched /
+  assigned / completed - rather than inferring coverage after the
+  fact from which solutions happen to exist), and clients will report
+  results out of order once distributed, making gap-tracking
+  unavoidable at that point regardless. Treat the current merge
+  script as a stopgap starting point, not a permanent substitute for
+  the server's own bookkeeping.
+
   Server responsibilities:
   - Maintain three buckets of range state: unsearched, assigned
     (with a deadline), and completed. The initial unsearched set comes
