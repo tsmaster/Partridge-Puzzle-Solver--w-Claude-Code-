@@ -85,8 +85,12 @@ Future work for Claude/rangesolver
   --start/--end range or worker found it, when), add columns for that
   at the same time rather than needing a schema migration later.
 
-- Progress rate / ETA estimation: observe how fast solutions are being
+- [HIGH PRIORITY] Progress rate / ETA estimation: observe how fast solutions are being
   found and predict how long it will take to finish the current run.
+  Bumped to high priority after a manual back-of-envelope estimate
+  (1564 solutions / 6000s, extrapolated to 1.7M) got the unit
+  conversion wrong by ~10x (11 weeks, not 1 week) - a tool that does
+  this arithmetic automatically would have caught that immediately.
   Two complementary estimators, since they have different strengths:
 
   A) Tree-fraction estimator (model-free, works for any --start/--end
