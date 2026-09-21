@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <cstring>
@@ -9,6 +10,7 @@
 const int FRAME_WIDTH = 45;
 const double PRINT_DELAY = 3.0;
 const long long CLOCK_CHECK_INTERVAL = 1024; // only query the clock every this many nodes
+const uint64_t WIDTH_MASK = (uint64_t(1) << FRAME_WIDTH) - 1; // bits 0..44 set
 
 auto g_start_time = std::chrono::steady_clock::now();
 auto g_last_print_time = g_start_time;
@@ -18,38 +20,30 @@ std::string g_log_filename = "Solutions/soln_log_range.txt";
 bool g_inplace_status = false;   // overwrite each status line instead of scrolling
 bool g_printed_status = false;   // whether any status line has been printed yet
 
+// Occupancy only - one bit per cell, packed into a 64-bit word per row (FRAME_WIDTH=45 fits
+// comfortably). This is the hot path (checked/toggled on every trial placement at every node),
+// so it's kept to just occupancy: no per-cell size/offset bookkeeping here at all. Rendering a
+// found solution's ASCII art is done separately, once per solution, from the recorded sequence
+// of placements (see log_solution_to_file) rather than incrementally maintained on every node.
 class Grid
 {
 public:
-  bool is_occupied[FRAME_WIDTH][FRAME_WIDTH];
-  int occ_size[FRAME_WIDTH][FRAME_WIDTH];
-  int occ_offset_x[FRAME_WIDTH][FRAME_WIDTH];
-  int occ_offset_y[FRAME_WIDTH][FRAME_WIDTH];
+  uint64_t occ_row[FRAME_WIDTH];
 
   void init_blank() {
-    for (int x = 0; x < FRAME_WIDTH; ++x) {
-      for (int y = 0; y < FRAME_WIDTH; ++y) {
-        is_occupied[x][y] = false;
-        occ_size[x][y] = 0;
-        occ_offset_x[x][y] = 0;
-        occ_offset_y[x][y] = 0;
-      }
+    for (int y = 0; y < FRAME_WIDTH; ++y) {
+      occ_row[y] = 0;
     }
-  }
-
-  bool is_location_occupied(int x, int y) {
-    return is_occupied[x][y];
   }
 
   bool can_place_piece_at_location(int size, int x, int y) {
     if ((x+size > FRAME_WIDTH) || (y+size > FRAME_WIDTH)) {
       return false;
     }
-    for (int x_off = 0; x_off < size; ++x_off) {
-      for (int y_off = 0; y_off < size; ++y_off) {
-        if (is_location_occupied(x + x_off, y + y_off)) {
-          return false;
-        }
+    uint64_t mask = ((uint64_t(1) << size) - 1) << x;
+    for (int row = y; row < y + size; ++row) {
+      if (occ_row[row] & mask) {
+        return false;
       }
     }
     return true;
@@ -59,90 +53,74 @@ public:
   // a piece is always placed at-or-after the previous free location in raster order, so nothing
   // before that point can become free again until backtracking undoes it.
   bool get_first_free_loc(int hint_x, int hint_y, int &out_x, int &out_y) {
-    for (int x = hint_x; x < FRAME_WIDTH; ++x) {
-      if (!is_location_occupied(x, hint_y)) {
-        out_x = x;
-        out_y = hint_y;
-        return true;
-      }
+    uint64_t free_bits = (~occ_row[hint_y]) & WIDTH_MASK & (~uint64_t(0) << hint_x);
+    if (free_bits != 0) {
+      out_x = __builtin_ctzll(free_bits);
+      out_y = hint_y;
+      return true;
     }
+
     for (int y = hint_y + 1; y < FRAME_WIDTH; ++y) {
-      for (int x = 0; x < FRAME_WIDTH; ++x) {
-        if (!is_location_occupied(x, y)) {
-          out_x = x;
-          out_y = y;
-          return true;
-        }
+      free_bits = (~occ_row[y]) & WIDTH_MASK;
+      if (free_bits != 0) {
+        out_x = __builtin_ctzll(free_bits);
+        out_y = y;
+        return true;
       }
     }
     return false;
   }
 
   void insert_piece_at_location(int sz, int x, int y) {
-    for (int x_off = 0; x_off < sz; ++x_off) {
-      for (int y_off = 0; y_off < sz; ++y_off) {
-        int cx = x + x_off;
-        int cy = y + y_off;
-        is_occupied[cx][cy] = true;
-        occ_size[cx][cy] = sz;
-        occ_offset_x[cx][cy] = x_off;
-        occ_offset_y[cx][cy] = y_off;
-      }
+    uint64_t mask = ((uint64_t(1) << sz) - 1) << x;
+    for (int row = y; row < y + sz; ++row) {
+      occ_row[row] |= mask;
     }
   }
 
   void remove_piece_at_location(int sz, int x, int y) {
-    for (int x_off = 0; x_off < sz; ++x_off) {
-      for (int y_off = 0; y_off < sz; ++y_off) {
-        is_occupied[x + x_off][y + y_off] = false;
-      }
+    uint64_t mask = ((uint64_t(1) << sz) - 1) << x;
+    for (int row = y; row < y + sz; ++row) {
+      occ_row[row] &= ~mask;
     }
-  }
-
-  void print() {
-    for (int y = 0; y < FRAME_WIDTH; ++y) {
-      char line[FRAME_WIDTH + 1];
-      for (int x = 0; x < FRAME_WIDTH; ++x) {
-        if (!is_occupied[x][y]) {
-          line[x] = '.';
-        } else if (occ_offset_x[x][y] == 0) {
-          line[x] = (occ_offset_y[x][y] == 0) ? '+' : '|';
-        } else {
-          line[x] = (occ_offset_y[x][y] == 0) ? '-' : ('0' + occ_size[x][y]);
-        }
-      }
-      line[FRAME_WIDTH] = '\0';
-      printf("%s\n", line);
-    }
-    printf("---\n");
-  }
-
-  // Writes to an already-open file handle rather than opening/closing one per call, since this
-  // runs once per solution found and re-opening the file each time is wasted syscall overhead
-  // once solutions start coming frequently.
-  void log_to_file(FILE* f) {
-    for (int y = 0; y < FRAME_WIDTH; ++y) {
-      char line[FRAME_WIDTH + 1];
-      for (int x = 0; x < FRAME_WIDTH; ++x) {
-        if (!is_occupied[x][y]) {
-          line[x] = '.';
-        } else if (occ_offset_x[x][y] == 0) {
-          line[x] = (occ_offset_y[x][y] == 0) ? '+' : '|';
-        } else {
-          line[x] = (occ_offset_y[x][y] == 0) ? '-' : ('0' + occ_size[x][y]);
-        }
-      }
-      line[FRAME_WIDTH] = '\0';
-      fprintf(f, "%s\n", line);
-    }
-    fprintf(f, "---\n\n");
-    fflush(f); // keep the file readable in real time (e.g. by `tail -f`) despite staying open
   }
 };
 
 Grid g_grid;
-int g_path[FRAME_WIDTH];
+int g_path[FRAME_WIDTH];      // tile size placed at each step, in raster/placement order
+int g_placed_x[FRAME_WIDTH];  // upper-left x of the tile placed at each step
+int g_placed_y[FRAME_WIDTH];  // upper-left y of the tile placed at each step
 FILE* g_log_file = nullptr;
+
+// Renders a completed solution's ASCII art (same format as CppSolver/solver.cpp) by replaying
+// the FRAME_WIDTH recorded placements, rather than reading incrementally-maintained per-cell
+// state - this is only ever done once per solution found, not once per search node.
+void log_solution_to_file(FILE* f) {
+  char grid[FRAME_WIDTH][FRAME_WIDTH];
+  for (int i = 0; i < FRAME_WIDTH; ++i) {
+    int x = g_placed_x[i];
+    int y = g_placed_y[i];
+    int sz = g_path[i];
+    for (int x_off = 0; x_off < sz; ++x_off) {
+      for (int y_off = 0; y_off < sz; ++y_off) {
+        char c;
+        if (x_off == 0) {
+          c = (y_off == 0) ? '+' : '|';
+        } else {
+          c = (y_off == 0) ? '-' : char('0' + sz);
+        }
+        grid[y + y_off][x + x_off] = c;
+      }
+    }
+  }
+
+  for (int y = 0; y < FRAME_WIDTH; ++y) {
+    fwrite(grid[y], 1, FRAME_WIDTH, f);
+    fputc('\n', f);
+  }
+  fprintf(f, "---\n\n");
+  fflush(f); // keep the file readable in real time (e.g. by `tail -f`) despite staying open
+}
 
 class PieceSet
 {
@@ -249,7 +227,7 @@ void full_solver(PieceSet* remain, int depth, bool lower_tight, bool upper_tight
 
   if (remain->is_empty()) {
     ++g_solutions_found;
-    g_grid.log_to_file(g_log_file);
+    log_solution_to_file(g_log_file);
     return;
   }
 
@@ -287,6 +265,8 @@ void full_solver(PieceSet* remain, int depth, bool lower_tight, bool upper_tight
 
     if (g_grid.can_place_piece_at_location(sz, free_x, free_y)) {
       g_path[depth] = sz;
+      g_placed_x[depth] = free_x;
+      g_placed_y[depth] = free_y;
       g_grid.insert_piece_at_location(sz, free_x, free_y);
       remain->count[sz]--;
       full_solver(remain, depth + 1, next_lower_tight, next_upper_tight,
