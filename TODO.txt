@@ -1,26 +1,29 @@
 Future work for Claude/rangesolver
 ===================================
 
-- Partition helper via a --enumerate-depth=N mode on rangesolver
-  itself (not a separate script): most N-digit strings aren't valid
-  prefixes (piece counts run out, or a tile doesn't fit there), so the
-  only correct way to find the valid ones is to replay the actual
-  search - Grid + PieceSet + get_first_free_loc - down to depth N and
-  record every node reached there, instead of continuing to depth 45.
-  That's just full_solver truncated at a fixed depth, so it belongs in
-  rangesolver.cpp itself rather than a second implementation of the
-  placement logic that could drift out of sync.
-  Output: one line per valid depth-N prefix. No need to pair adjacent
-  prefixes into ranges - since --start/--end already treat a shorter
-  string as an entire inclusive subtree (verified with the earlier
-  single-prefix tests), each individual depth-N prefix used as both
-  --start=P and --end=P is already one complete, disjoint unit of
-  work. Pick N so the prefix count comfortably exceeds the number of
-  workers/cores available.
-  This is also a prerequisite for the client/server system noted
+- [DONE] Partition helper via a --enumerate-depth=N mode on rangesolver
+  itself. Truncates the same traversal (Grid + PieceSet +
+  get_first_free_loc, same tight-bound machinery as normal solving) at
+  a target depth and writes every distinct valid N-digit prefix
+  reached there to a file, one per line, in the same decreasing order
+  they'd be visited in - each line already a --start=P --end=P pair
+  covering one complete, disjoint unit of work. Honors --start/--end
+  too, so it can enumerate ahead of an existing range, not just from
+  the tree's root, which the adaptive/recursive splitting design below
+  needs.
+  Output file is named/timestamped distinctly from the solution log
+  (Solutions/prefixes_depth<N>_<timestamp>.txt vs.
+  soln_log_range_<timestamp>.txt) so it's never mistaken for a file of
+  complete solutions; --out overrides it, mirroring --log.
+  Verified: --enumerate-depth=2 finds exactly 80 of 81 combinatorially
+  possible prefixes (correctly excluding "11" - only one 1x1 tile
+  exists), enumerating past an existing bound only branches after the
+  bound is exhausted and produces correctly-ordered results, invalid
+  depths are rejected, and existing solving-mode correctness checks
+  still pass with no timing regression.
+  This was also a prerequisite for the client/server system noted
   below, not just a standalone tool: the server needs exactly this
-  enumeration to seed its initial "unsearched" pool, so building it
-  now is directly reusable later rather than throwaway work.
+  enumeration to seed its initial "unsearched" pool.
 
 - Parallel launcher: a wrapper (shell or python) that takes the
   partition list above and runs one rangesolver process per range
