@@ -558,12 +558,16 @@ just not sharing a filename with real runs in the first place.
   - Cron job setup (the crontab entry itself) is separate from the
     script - the script should be runnable and testable standalone
     first.
-  - Worth persisting the previous run's count to a small local state
-    file so each message can report "X new since last check" (and,
-    combined with the time between runs, a rough interim rate) rather
-    than just a static total - complements the progress-rate/ETA idea
-    above with a periodic real-world data point instead of only a
-    live process's own self-reported rate.
+  - Rather than a single "previous count" state file, store each
+    check as a (count, timestamp) row in a small SQLite database
+    (same tool/rationale as the SQLite-backed solution storage idea
+    above) - a few rows a day costs nothing to keep indefinitely, and
+    unlike a single overwritten "last count" value, it builds a real
+    history: not just "X new since last check" for the text message,
+    but a queryable time series to compute a trailing rate over any
+    window, plot progress over time, or feed a smarter version of the
+    progress-rate/ETA idea above with actual historical data instead
+    of only a live process's own short-window self-reported rate.
   - Consider whether to send every scheduled run regardless, or only
     when the count has actually changed, to avoid four identical
     "no new solutions" texts a day during a slow stretch.
