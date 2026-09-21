@@ -430,7 +430,7 @@ Future work for Claude/rangesolver
     already embarrassingly parallel and this avoids needing
     SharedArrayBuffer's cross-origin-isolation deployment requirements.
 
-- Bitboard/bitmask row representation. FRAME_WIDTH is 45, which fits
+- [HIGHEST PRIORITY, NOT STARTED] Bitboard/bitmask row representation. FRAME_WIDTH is 45, which fits
   in a single 64-bit word per row. Representing each row as a uint64_t
   occupancy bitmask turns can_place_piece_at_location's nested
   size x size loop into `size` bitwise ANDs against a precomputed,
