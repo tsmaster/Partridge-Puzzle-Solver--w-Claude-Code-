@@ -381,6 +381,26 @@ Future work for Claude/rangesolver
   out the resulting pieces. This sizes work units to the tree's actual
   (very likely uneven) shape instead of a schedule of guessed depths.
 
+  Real-world evidence this matters, not just a theoretical concern
+  (2026-09-22): with 6 workers running against the real bootstrapped
+  ranges.db for about a day, range #1 (prefix "99999" - the one seeded
+  with a resumed start point rather than a fresh range, since it
+  carries the entire pre-worker-system historical search as its own
+  single unit of work) was STILL running after ~24 hours, having
+  advanced but not finished, while 6,126 other ranges had already
+  completed in the same span. Among those 6,126 completed ranges,
+  median solutions found was 0, mean 81.6, and only 21 (0.34%) found
+  more than 5,000 - range #1 is not a normal-sized unit of work by a
+  wide margin. The dashboard's ETA (a solutions-count extrapolation
+  toward the ~1.73M target) doesn't capture this: the search isn't
+  exhaustively complete until every range finishes, including
+  outliers like this one, regardless of when the aggregate found-count
+  happens to reach target via other ranges. This is exactly the
+  scenario on-demand splitting is for - chose to leave range #1
+  running as a single unit for now rather than manually split it
+  mid-run, but flagging this as concrete, current evidence for
+  prioritizing the feature rather than a hypothetical one.
+
   Client responsibilities:
   - Discovery: broadcast a small UDP packet (with a recognizable
     magic string, so random LAN broadcast noise doesn't trigger a
