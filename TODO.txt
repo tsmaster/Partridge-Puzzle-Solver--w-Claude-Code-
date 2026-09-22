@@ -401,6 +401,43 @@ Future work for Claude/rangesolver
   mid-run, but flagging this as concrete, current evidence for
   prioritizing the feature rather than a hypothetical one.
 
+  Concrete manual procedure worked out for range #1 specifically
+  (2026-09-22), to do by hand later, or as the model for the eventual
+  automated on-demand splitting: naively generating one 6-digit
+  sub-prefix per next digit (999999 down to 999991, 9 sub-ranges) is
+  NOT correct as-is, since it ignores how far the range has already
+  progressed - at the time this was worked out, range #1's live
+  position was 99999887778993882656557778475426633414, which starts
+  with 999998, meaning: 999999 is already 100% covered (the search
+  passed through the whole thing on the way to the current position) -
+  including it as a sub-range would waste an entire unit of work
+  re-finding nothing new; 999998 is partially covered - it needs a
+  RESUMED sub-range (--start=<current position>, --end=999998), not a
+  fresh one from its own top; 999997 down through 999991 (7 prefixes)
+  are genuinely untouched and get fresh sub-ranges (--start=--end=
+  prefix). So the correct split is 8 sub-ranges, not 9 - this is
+  exactly gaps_for_prefix's logic from bootstrap_ranges.py, just
+  applied to one specific in-progress range's current position instead
+  of a merged set of finished solution files.
+  To actually execute this on the live system: (1) send SIGTERM to the
+  range's current worker.py pid and confirm it exits - its existing
+  graceful-shutdown handling already releases the range with its final
+  resume position, no new code needed for this part; (2) read that
+  final position (it'll have advanced further than whatever was last
+  checked); (3) in one transaction, insert the new sub-ranges as
+  'unsearched' rows and mark the original range's row with a new
+  status ('split', distinct from 'done', so it's excluded from future
+  claims without implying a misleading solutions_found count that
+  worker.py never actually set for it); (4) update dashboard.py's
+  summary line to also count 'split' rows, so the totals stay
+  self-consistent (currently unsearched+in_progress+done would
+  otherwise undercount by however many ranges have been split).
+  Caveat: there's a small, low-stakes race between step 1's release and
+  step 3's update, where another worker could claim the
+  not-yet-split range fresh in between - if that happens it just
+  continues the original (still large) range normally, not a bug,
+  just a missed opportunity that would need retrying.
+
   Client responsibilities:
   - Discovery: broadcast a small UDP packet (with a recognizable
     magic string, so random LAN broadcast noise doesn't trigger a
