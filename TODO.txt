@@ -438,6 +438,28 @@ Future work for Claude/rangesolver
   continues the original (still large) range normally, not a bug,
   just a missed opportunity that would need retrying.
 
+  For the eventual AUTOMATED on-demand splitting, close that race
+  properly instead of accepting it: add a new status, 'held_for_split'
+  (or similar), and set it BEFORE interrupting the range's worker, not
+  after releasing it - i.e. flip the sequencing from the manual
+  procedure above. worker.py's claim_range() query already only ever
+  looks for status='unsearched' or status='in_progress' - a row in any
+  other status is already invisible to it, so this needs zero changes
+  to the claim logic itself. The only new code needed is whatever sets
+  'held_for_split' (immediately closing the range to new claims, while
+  its own current worker keeps running utterly unaffected until
+  signaled) and whatever later resolves it - either into 'split' once
+  the sub-ranges are inserted, or back to a claimable state if the
+  split attempt is abandoned.
+  Don't forget the failure-recovery case this introduces: if whatever
+  process is doing the splitting crashes after setting
+  'held_for_split' but before resolving it, that range would be stuck
+  forever unless something detects and recovers it - the same
+  liveness-based staleness pattern already used for orphaned
+  in_progress ranges applies directly here (record which pid is doing
+  the holding, and let another process reclaim/revert a hold whose
+  holder has died), rather than inventing a new mechanism.
+
   Client responsibilities:
   - Discovery: broadcast a small UDP packet (with a recognizable
     magic string, so random LAN broadcast noise doesn't trigger a
