@@ -1,0 +1,198 @@
+Partridge Puzzle (n=9, 45x45 grid) - Results
+=============================================
+
+Exhaustive search completed: 2026-09-25
+
+The full search of the 45x45 Partridge Puzzle (one 1x1 tile, two 2x2, ... up to
+nine 9x9, totaling 45x45=2025 area) is complete: every unit of the search space
+has been searched, not just estimated via extrapolation.
+
+Total unique solutions: 1,730,280
+  Exact match to Matt Parker's cited figure (see notes.txt and the source
+  video, https://youtu.be/eqyuQZHfNPQ, "The impossible puzzle with over a
+  million solutions!") - not an approximation, the same number digit for
+  digit.
+
+n=8 sub-puzzle (36x36 grid, tiles sized 1-8): 18,656 solutions
+  Confirmed two independent ways: reproduced from scratch with our own
+  solver, and matches Matthew Scroggs' companion blog post
+  (mscroggs.co.uk/blog/119) exactly. The original August 2026 note in
+  notes.txt recording "18177" was a transcription error - the real count is
+  18,656 (2,332 unique once rotations/reflections are treated as the same
+  solution, matching the historical Bill Cutler/Patrick Hamlyn result).
+  The from-scratch confirmation run took 15h36m (real time, nsolver.cpp's
+  original unoptimized -O2 build, no bitboards, single-threaded) - a
+  striking contrast against the full n=9 search this project completed in
+  under a week across a multi-worker distributed system with bitboards,
+  -O3 -march=native, and remote workers.
+
+
+How long did the full n=9 search actually take?
+--------------------------------------------------
+An "apples to apples" answer is tricky, since the project spanned months
+with long idle stretches, not continuous effort. Three framings, all
+measured to the same completion moment (2026-09-25 19:24:11 UTC, when the
+last range finished):
+
+  A) Idea to completion - from the earliest file of the original Python
+     solver (solver/, 2026-07-11): 75.78 days.
+  B) First solution ever found on disk (CppSolver/Solutions/soln_001_...,
+     2026-07-12) to completion: 75.31 days.
+  C) Start of the distributed-search rewrite - Claude/rangesolver.cpp's
+     first commit (2026-09-20), the range-bounded/bitboard-optimized
+     solver that eventually ran across multiple machines - to completion:
+     4.87 days.
+
+A and B are raw calendar time, not active compute time - there's no
+record of how much of those ~75 days had anything actually running. C is
+the fairest comparison against the n=8 confirmation run's 15h36m above,
+since both measure "how long did active, continuous searching take" - and
+even there, going from 15h36m (single-threaded, unoptimized, n=8) to 4.87
+days (distributed across multiple machines, bitboards, -O3 -march=native,
+n=9) reflects how much bigger the n=9 search space actually is, not a
+regression - n=9 has about 92.7 times as many solutions as n=8, on a board
+with 2025 cells instead of 1296, searched 9 tile sizes deep instead of 8.
+
+
+How fast did each version of the solver actually run?
+----------------------------------------------------------
+Measured directly (2026-10-02) rather than estimated: each version
+instrumented with a node counter and run for a fixed 30-second window from
+a cold start (same machine, same full/unrestricted search), reporting raw
+search nodes explored per second - a fairer throughput metric than
+solutions/sec, since how many solutions turn up in a short window depends
+on combinatorial luck about where in the tree you happen to be, not on
+raw execution speed.
+
+  Python (solver/main.py, the original):        6,568 nodes/sec
+  Original C++ port (CppSolver/solver.cpp,
+    -O2, naive 2D array):                   1,050,340 nodes/sec  (160x)
+  First Claude/rangesolver.cpp commit
+    (naive 2D array, -O2):                  4,658,986 nodes/sec  (4.4x)
+  Final rangesolver.cpp (bitboard rows,
+    -O3 -march=native):                    13,675,063 nodes/sec  (2.94x)
+
+(the "x" figures are each step's speedup over the row above it)
+
+Notes on what's actually being compared:
+  - The Python run found zero solutions in its 30-second window either
+    way (it's that much slower), so nodes/sec - not solutions/sec - is
+    the only metric that was measurable at all there.
+  - solver.cpp -> first rangesolver.cpp is a real, measured 4.4x jump
+    despite both using -O2 and a naive (non-bitboard) occupancy
+    representation - likely because rangesolver.cpp doesn't maintain the
+    extra per-cell size/offset bookkeeping solver.cpp's Grid class keeps
+    on every placement (needed for its own rendering approach, not for
+    the search itself) - flagged as the probable cause, not fully traced.
+  - End to end, original C++ port -> current distributed-solver binary:
+    13.02x, combining both the algorithmic change (bitboards) and the
+    build-flag change (-O2 -> -O3 -march=native).
+
+
+L / I / Other classification
+-----------------------------
+Every solution can be classified by where its nine 9x9 tiles land:
+
+  L:      74,624  (4.313%)
+    The nine 9x9 tiles form a forced border along two adjacent edges of the
+    board (five tiles along one full 45-length edge, four along the
+    remaining 36-length edge), with the 36x36 interior holding exactly one
+    n=8 sub-solution and nothing else. Fully determined by the n=8 count:
+    exactly 4 x 18,656 (one for each choice of corner), with zero remaining
+    freedom once a corner is picked - the border tiling is forced.
+
+  I:   1,303,584  (75.339%)
+    The nine 9x9 tiles include a straight line of five, spanning the full
+    width or height of the board - not necessarily touching an edge. Splits
+    into 1,299,744 where that line is flush against a border, and 3,840
+    where it runs through the interior instead (e.g. a horizontal line of
+    five 9x9 tiles at some row in the middle of the board).
+
+  Other: 352,072  (20.348%)
+    No such line exists among the nine 9x9 tiles at all - they're
+    positioned without forming a clean L or I shape.
+
+Note on Matt Parker's video: it states the same three numbers, but the "L"
+and "other" labels are swapped relative to what the geometry it describes
+actually produces (352,072 is stated as "L", 74,624 as "other" - the
+reverse). Also, the video's description of "I" ("a single column of
+9x9s... not clear if a column in the interior would also count") is
+resolved: yes, an interior line counts, not just one touching an edge -
+confirmed directly by finding exactly 3,840 solutions with an interior
+line, which is precisely the gap between our edge-only count and Parker's
+stated I total.
+
+
+Structural finding: interior-I lines occur at only one location
+-------------------------------------------------------------------
+Among the 3,840 "interior I" solutions (a straight line of five 9x9 tiles
+running through the middle of the board rather than flush against an edge -
+see above), the line's position isn't spread across the 35 possible interior
+rows/columns at all. It only ever occurs at a single location, up to the
+board's own rotations and reflections: row 16 (equivalently row 20, its
+mirror image) for a horizontal line, or column 16/20 for a vertical one -
+960 solutions at each of these 4 equivalent positions, 3,840 total, with
+zero solutions at any other interior row or column. In every one of these
+960-solution groups, the remaining four 9x9 tiles (the ones not part of the
+line itself) split exactly 2-and-2 between the two strips the line divides
+the board into - never any other split. Why exactly this position (and not,
+say, row 14 or 22) is forced isn't nailed down - not chased further for
+now - but the search being exhaustive means this is a confirmed fact about
+the puzzle, not a pattern noticed in a sample.
+
+The 2-and-2 split itself recurses in a self-similar way. Looking at the
+row-16 case specifically (960 solutions): the line divides the board into a
+16-tall strip above and a 20-tall strip below, each holding two of the four
+remaining 9x9 tiles.
+  - In the 16-tall strip, those two tiles are always flush against one end
+    or the other - starting at row 0 (the top of the whole board) or row 7
+    (16-9, the bottom of that strip) - never anywhere in between. 24
+    distinct x-position pairings occur, each appearing exactly 40 times
+    (24 x 40 = 960) - evenly distributed, no single dominant arrangement.
+  - In the taller 20-tall strip, the two tiles land at row-offsets of
+    exactly 0, 5, 6, or 11 within that strip (20-9=11, so 0/11 are again
+    the flush-top/flush-bottom extremes) - but 5 and 6 are also allowed,
+    which are the two integer positions closest to that strip's exact
+    center (5.5). Nothing else occurs. 12 distinct configurations show up,
+    in two tiers: 8 at 96 solutions each and 4 at 48 each (8x96 + 4x48 =
+    960).
+  So the top-level finding (the line sits at one special place, not a free
+  range of 35) echoes one level down: each strip the line creates shows its
+  own miniature version of the same phenomenon - a small, fixed menu of
+  allowed positions (always the extremes, sometimes also dead center),
+  never a free continuum. The combinatorial reason behind either level
+  hasn't been worked out - noted here as an observed structural fact from
+  the complete dataset, not yet an explained one.
+
+
+Structural finding: the "99999" outlier
+-----------------------------------------
+Prefix "99999" - the very first branch in the search's traversal order
+(the search always tries the largest remaining tile first, so the first
+five placements being 9,9,9,9,9 fills the entire top row with five 9x9
+tiles) - turned out to be an extreme outlier in size. Automatic splitting
+eventually broke it into 177 sub-ranges (reaching 10 digits deep), and it
+produced 318,261 solutions on its own - about 18% of the entire puzzle's
+solutions from a single top-level branch out of many thousands.
+
+
+Darryl's serif-I conjecture
+------------------------------
+Proposed shape: a column of five 9x9 tiles centered in the frame (columns
+18-26, full height), plus one more 9x9 tile as a "serif" beside each end
+of the column (using all nine 9x9 tiles between the column and the four
+serifs). Confirmed NOT completable with the remaining tiles (sizes 1-8) -
+proven by exhaustive search of the remaining 1296-cell region (119,208
+nodes explored, every branch tried and failed), not just "not found in
+the time available."
+
+
+Sources / cross-references
+-----------------------------
+- notes.txt - original figures as recorded from the video
+- https://youtu.be/eqyuQZHfNPQ - Matt Parker's video
+- https://www.mscroggs.co.uk/blog/119 - Matthew Scroggs' companion blog,
+  independently corroborates the n=8 (18,656) and n=9 (1,730,280 total /
+  216,285 up to rotation+reflection) figures
+- Claude/TODO.txt - full investigation history, implementation detail, and
+  the reasoning behind every number above

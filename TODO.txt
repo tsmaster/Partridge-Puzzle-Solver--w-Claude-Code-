@@ -201,6 +201,10 @@ Future work for Claude/rangesolver
   If solution metadata beyond the hash is ever wanted (e.g. which
   --start/--end range or worker found it, when), add columns for that
   at the same time rather than needing a schema migration later.
+  [DONE, retroactively marked 2026-09-23] Implemented as
+  tools/solution_db.py exactly as designed - incremental byte-offset-
+  tracked ingest into solutions.db, driven periodically by
+  dashboard.py rather than a separate standalone step.
 
 - [HIGH PRIORITY] Progress rate / ETA estimation: observe how fast solutions are being
   found and predict how long it will take to finish the current run.
@@ -237,6 +241,15 @@ Future work for Claude/rangesolver
   The two could be shown side by side in the periodic status line
   once solutions_found is nonzero, or (A) alone when running a
   partial range where (B) doesn't apply.
+  [DONE, retroactively marked 2026-09-23] (B) implemented in
+  dashboard.py (compute_average_rate()/format_eta()) and reused by
+  sms_notify.py. (A), the per-range tree-fraction estimator, was never
+  built - not needed once the range-based worker/dashboard system
+  replaced the single-long-running-process model this was designed
+  for, since the dashboard's aggregate rate/ETA covers the common
+  case. Would still be useful for estimating a single outlier range's
+  own remaining work (e.g. range #1, prefix 99999 - see the real-world
+  evidence entry below) if that becomes a priority on its own.
 
 - Merge/dedupe tool (Python, likely tools/merge_solutions.py): take a
   list of input filenames, accepting glob-style wildcards (e.g.
@@ -460,6 +473,141 @@ Future work for Claude/rangesolver
   the holding, and let another process reclaim/revert a hold whose
   holder has died), rather than inventing a new mechanism.
 
+  [DONE, 2026-09-23] Implemented as tools/splitter.py, run as its own
+  long-lived xterm process like worker.py/dashboard.py (not cron -
+  consistent with the rest of this system, and gives live visibility
+  into split actions as they happen). Every --check-interval (default
+  5min) it looks for in_progress ranges claimed more than
+  --age-threshold-hours (default 2) ago and splits each: flips it to
+  'held_for_split' (BEGIN IMMEDIATE, conditioned on still being
+  in_progress - loses the race gracefully if it finished naturally in
+  the meantime), kills its actual rangesolver child process (matched
+  via --log= against log_file, same technique as
+  dashboard.list_running_rangesolvers() - not the stored pid column,
+  which is worker.py's own pid), waits briefly for the owning
+  worker.py's existing "didn't complete cleanly; leaving it for
+  reclaim" path to run (release_range() - needed ZERO changes, since
+  it already clears pid and updates range_start without ever touching
+  status), then reads the resulting live position and enumerates one
+  digit deeper, classifying each of the (up to) 9 candidates as fully
+  covered/resumed/fresh as documented above. Verified against a
+  scratch ranges.db copy (never the live one) covering: the race-lost
+  path, the orphan path (no live process to kill), and a real spawned
+  dummy process actually killed and "released" by a simulated
+  worker.py, all producing correct sub-ranges; the classification
+  logic was checked directly against the job #1 numbers recorded
+  above (999999 skipped, 999998 resumed, 999991-999997 fresh).
+  Known gap, not built: the crash-recovery case flagged in the
+  paragraph above (a splitter dying mid-split leaves the row stuck in
+  held_for_split forever) has no automatic recovery - only a
+  dashboard.py WARNING line surfacing the stuck count for manual
+  intervention. Low risk (the window between setting held_for_split
+  and resolving it is seconds), but worth the same liveness-pid
+  treatment as orphaned in_progress ranges if it ever actually happens.
+  dashboard.py also updated: status line now shows split=N alongside
+  the existing counts, and "tracked" solutions now include split
+  ranges' own solutions_found (counted from their log file at split
+  time), not just done ones.
+
+  [OBSERVED, 2026-09-23] Confirmed live against range #1 (the actual
+  47h-old outlier, not just the scratch-db tests) - worked correctly,
+  but produced a surprising side effect worth a note: worker.py's
+  claim_range() picks the next unsearched range via
+  `ORDER BY range_start DESC LIMIT 1`, a plain lexicographic string
+  comparison. The new depth-6 sub-ranges (e.g. "999998...") all start
+  with '9', which sorts above every depth-5 "8xxxx"-prefix range still
+  in the normal queue (the search front had moved on to ~84888 by
+  then) regardless of the fact that a proper numeric/depth-aware
+  comparison would place them further back, in among where "99999"
+  itself already was. Result: 5 of 6 workers immediately grabbed the
+  new sub-ranges instead of them landing at the "end of the queue" as
+  might be naively expected. Originally assessed as harmless (doesn't
+  change what gets searched, only the order) - REVISED, 2026-09-23:
+  this was wrong, it's a real problem. Observed live: range #1's
+  lineage kept getting split, but each split's children (all still
+  "9......."-prefixed) sorted ahead of the depth-5 backlog again,
+  recapturing every worker that freed up - a feedback loop that pulled
+  the prefix depth to 7 then 8 while the 41,159-range backlog made
+  literally zero progress for 4+ hours straight (verified: no depth-5
+  range's finished_at is newer than 15:19:33, while the "99999" lineage
+  kept finishing ranges the whole time). [HIGH PRIORITY] Needs a real
+  fix, not just the naive one: simply sorting shallow-depth-first would
+  flip the starvation the other way (split children would never get
+  worked until the whole backlog drains first, defeating the point of
+  splitting). What's actually needed is a per-lineage concurrency cap -
+  idea floated in conversation (2026-09-23): allow at most 2 workers
+  claimed on any range whose prefix shares the same length-5 root, so
+  the rest of the pool always spills into the backlog (or other
+  lineages) instead of piling onto whichever branch happens to be
+  actively splitting. Implementation note: no new coordination
+  mechanism is needed for this - ranges.db already has full visibility
+  into every currently in_progress range's prefix, so claim_range()
+  can just count `WHERE status='in_progress' AND SUBSTR(prefix,1,5)=?`
+  for a candidate's root before claiming it, skipping (not permanently
+  excluding) any candidate whose root is already at the cap, with a
+  fallback so a worker never sits fully idle if every remaining
+  unsearched row happens to be over-cap. Deliberately left for later -
+  not fixing now.
+
+  [DONE, 2026-09-23] Implemented in worker.py's claim_range() exactly
+  as sketched: MAX_WORKERS_PER_LINEAGE=2, enforced via a correlated
+  subquery (COUNT of in_progress rows sharing the candidate's
+  SUBSTR(prefix,1,5)) rather than a Python-side LIMIT-and-scan, so it's
+  correct regardless of how many over-cap candidates happen to sort
+  ahead of everything else (a fixed LIMIT batch could in principle be
+  entirely consumed by one oversubscribed lineage and never reach the
+  backlog at all - the SQL-side filter has no such failure mode).
+  Orphan-reclaim is untouched by the cap (an orphaned row is already
+  counted as in_progress, so reclaiming it doesn't add concurrency).
+  Verified against scratch databases (never the live one) covering:
+  cap enforced (backlog preferred over an at-cap lineage), cap
+  respected dynamically (lineage picked again once a sibling finishes
+  and frees a slot), the no-idle fallback (claims from an over-cap
+  lineage anyway when it's genuinely the only unsearched work left),
+  and orphan-reclaim still bypassing the cap correctly.
+  CORRECTION, 2026-09-23: earlier claimed this takes effect on already-
+  running workers with no restart needed - wrong. Python loads a
+  script's functions into memory once at process startup; editing the
+  file on disk afterward has zero effect on an already-running
+  interpreter. Confirmed live: after this fix, all 6 workers kept
+  claiming only from the "99999" lineage until manually restarted. Any
+  worker.py code change needs every running worker relaunched (Ctrl-C,
+  which releases its current range cleanly via the existing SIGINT
+  handler, then re-run) before it does anything.
+  Also confirmed live post-restart: restarting workers that are ALL
+  currently sitting on the same over-cap lineage doesn't immediately
+  fix anything either, since claim_range()'s orphan-reclaim path (for
+  the now-pid-cleared rows the restart just orphaned) runs BEFORE the
+  capped query and correctly bypasses the cap - so every restarted
+  worker just picks its own prior job straight back up. The system
+  self-heals as each of those jobs naturally finishes or gets split
+  (one at a time, not all at once): whichever worker becomes free at
+  that point finds no orphan to reclaim, falls through to the capped
+  query, and spills into the backlog - verified this happening live,
+  draining the "99999" lineage from 6 down to 2 over a few minutes.
+
+  [DONE, 2026-09-23] Related crash + fix: a live worker crashed outright
+  with sqlite3.OperationalError: database is locked from update_progress()
+  - a plain unretried UPDATE - despite the connection's 30s busy_timeout,
+  most likely because the cap fix above increased how many ranges are
+  concurrently active at once (more distinct claim_range()/
+  update_progress() traffic hitting ranges.db than when most workers
+  sat idle-ish on one lineage). No data was lost (the range self-healed
+  via ordinary orphan-reclaim), but the crashed process cost a worker
+  slot until manually relaunched. Fixed by adding with_db_retry() -
+  catches only "database is locked"/"database is busy" specifically,
+  retries with exponential backoff plus jitter (6 attempts,
+  0.05s base delay), re-raises immediately for any other error and
+  re-raises after the final attempt too rather than swallowing a
+  genuine persistent failure - and wrapping every write in worker.py
+  (claim_range, release_range, finish_range, update_progress, and a
+  newly-extracted set_log_file) with it. Verified with synthetic
+  failures: recovers from a transient lock, still surfaces a persistent
+  one, doesn't retry unrelated SQLite errors (e.g. a real schema
+  problem shouldn't be masked behind a retry loop), and non-SQLite
+  exceptions pass through untouched. Same restart caveat as above -
+  needs every running worker relaunched to take effect.
+
   Client responsibilities:
   - Discovery: broadcast a small UDP packet (with a recognizable
     magic string, so random LAN broadcast noise doesn't trigger a
@@ -640,9 +788,15 @@ just not sharing a filename with real runs in the first place.
   Solutions + Claude/Solutions), merge/dedupe (reuse the merge script
   above rather than a third copy of the same logic), count uniques,
   and text the current count to a phone via SMS.
-  Fancier version: also take the lowest-hash solution (the current
-  "high water mark" per the note above) and render it to an image
-  (reuse solution.py's save_to_png()), sending that as an MMS.
+  [DECLINED] Fancier version considered: also take the lowest-hash
+  solution (the current "high water mark" per the note above) and
+  render it to an image (reuse solution.py's save_to_png()), sending
+  that as an MMS. Decided against - plain text is enough, and TextBelt
+  (the provider actually used, see below) only supports MMS through a
+  chart-rendering endpoint (Chart.js/QuickChart or simple numeric
+  data), not sending an arbitrary pre-rendered image - would've needed
+  a different provider (e.g. Twilio's MMS mediaUrl) to do it as
+  originally envisioned anyway.
   Implementation notes:
   - Sending SMS/MMS from a script needs an external provider (e.g.
     Twilio, AWS SNS) and an account/API credentials - those
@@ -665,3 +819,590 @@ just not sharing a filename with real runs in the first place.
   - Consider whether to send every scheduled run regardless, or only
     when the count has actually changed, to avoid four identical
     "no new solutions" texts a day during a slow stretch.
+  [DONE] Implemented as tools/sms_notify.py, using TextBelt (not
+  Twilio - lighter signup) with credentials in a gitignored .env
+  (loaded via python-dotenv, since cron doesn't inherit an interactive
+  shell's exported env vars). Reuses solution_db.py for the count and
+  dashboard.py's solution_counts.db history table (both the delta
+  since last check and the rate/ETA) rather than duplicating either.
+  Installed in crontab: 7am/10am/1pm/4pm/7pm daily, --only-if-changed.
+  [GOTCHA, found 2026-09-23] TextBelt silently rejects (server-side
+  error, not a crash) any message containing a decimal-slash shape
+  like "6.65/s" - its unverified-account URL filter apparently treats
+  "number.number/letters" as a link. Cost a missed 7am text before the
+  cron log (tools/cron_sms.log) was checked and the pattern in the two
+  failing vs. one succeeding log entries pointed at compose_message()'s
+  new rate suffix. Fixed by rewording to "averaging 6.65 solutions per
+  sec" - no bare dot-slash anywhere. Keep this in mind for any future
+  wording change to the SMS text specifically (dashboard.py's own
+  on-screen display isn't affected, only text actually sent via
+  TextBelt).
+
+- [HIGH PRIORITY] Remove the sms_notify.py crontab entry once the
+  computation is done (or once this specific status-text notification
+  is no longer wanted) - this is meant to be a temporary check-in for
+  the active search, not a permanent fixture. `crontab -e` and delete
+  the "Partridge puzzle SMS status check-in" line (or `crontab -l` /
+  `crontab -r` as appropriate). Note it lives only in the crontab, not
+  in any git repo, so it won't show up in a diff/status check as
+  something to clean up - easy to forget.
+  [DONE, 2026-09-25] Removed. The search itself finished the same day -
+  every range done/split/historical, zero unsearched/in_progress left,
+  and the unique solution count landed at exactly 1,730,280, an exact
+  match to Parker's cited (and previously "unverified") target.
+
+- Reconcile Matt Parker's video "L"/"I"/"other" solution-count claims
+  (352,072 / 1,303,584 / 74,624) against CppSolver/nsolver.cpp's own
+  n=8 result (2026-09-23 investigation). Findings so far:
+  - Reproduced n=8 independently: CppSolver/Solutions/soln_log_8.txt
+    holds exactly 18,656 complete solutions (confirmed via exact
+    block-count and line-count arithmetic, no corruption/duplication).
+    This matches Matthew Scroggs' companion blog post
+    (mscroggs.co.uk/blog/119) exactly, which states "18656 solutions
+    for n=8 (2332 ... rotations and reflections [merged])" - i.e.
+    notes.txt's original "18177" figure from August was simply wrong
+    (typo or misremembering), not a real discrepancy. A from-scratch
+    background rerun of nsolver.cpp was kicked off to triple-check but
+    wasn't needed given the independent blog confirmation - check
+    whether it finished and matches too, out of due diligence.
+  - The video's own stated definition of an "L solution" ("just the
+    solutions for n=8, but with a big L of 9s along the edge") is a
+    fully-determined construction with zero remaining freedom: 4
+    choices of which two adjacent edges hold the L, and for each, the
+    9-wide border can only be tiled by 9x9 squares placed flush
+    end-to-end (the strip width equals the tile size exactly) - so the
+    count MUST be exactly 4 x 18,656 = 74,624. Not 352,072.
+  - 74,624 is exactly Parker's stated "other" count, not "L". Leading
+    hypothesis: the "L" and "other" labels are simply swapped
+    somewhere (video graphic, narration, or this conversation's
+    transcription of it) - not just because the arithmetic still sums
+    to 1,730,280 either way, but because it fits the combinatorics
+    better too: "L" (n=8 core + one fully rigid, forced two-edge
+    border, zero freedom beyond 4 corner choices) is about as
+    constrained a pattern as this puzzle has, while "other" ("no neat
+    lined up stack") is the loose catch-all residual - intuitively the
+    rare/rigid one should be the SMALL count and the loose/unconstrained
+    one should be the LARGE count, which is backwards in the original
+    labeling (L=352,072 big, other=74,624 small) but right if swapped
+    (L=74,624 small, other=352,072 big). Unconfirmed pending the
+    dataset check below. The "I" category (a single column of 9s,
+    definition given as somewhat ambiguous even by direct observation -
+    unclear if an interior column would also count) looks like a
+    post-hoc visual classification applied to the full already-computed
+    solution set rather than a clean generative formula like "L" - not
+    worth chasing by hand the way "L" was.
+  - Next step if this gets revisited: download and classify the actual
+    dataset (zenodo.org, DOI 10.5281/zenodo.17058519 - a 178.8MB zip
+    of all 1,730,280 solutions, linked from the mscroggs.co.uk blog)
+    directly, applying the exact "L" rule above (and whatever precise
+    rule for "I" can be inferred) programmatically - this would settle
+    the question with certainty instead of relying on a video's verbal
+    description, and would also nail down "I"'s real definition.
+    Explicitly held off on this for now (2026-09-23) - bigger effort
+    than the rest of this investigation, revisit if still curious.
+  - Testable side-prediction: if the "I" category (1,303,584) really
+    is just 4 symmetric cases of "five 9x9 tiles along one edge" (one
+    per edge, and by the dihedral symmetry of the board, with no
+    solution symmetric under any nontrivial rotation/reflection per
+    Danila P.'s comment on the mscroggs.co.uk blog, they must split
+    exactly evenly), then range #1's entire original scope (prefix
+    "99999" - five 9s along the top edge in raster order, exactly the
+    board-filling construction this predicts) plus everything split
+    off from it should total exactly 1,303,584 / 4 = 325,896 once that
+    whole lineage finishes. Live check on 2026-09-23 (partway through,
+    6 of 8 sub-ranges not yet done): 143,141 tracked so far
+    (`sqlite3 ranges.db "SELECT SUM(solutions_found) FROM ranges WHERE
+    prefix LIKE '99999%'"` for finished/split rows, plus grep -c
+    '^---$' on each still-running child's own log file for the rest) -
+    on track but far from conclusive this early. Worth checking again
+    once every range with prefix LIKE '99999%' reaches status 'done'
+    or 'split' - a good, cheap way to test the video's L/I claims
+    against real data well before the full 45x45 search finishes.
+
+- [SUPERSEDED, 2026-09-25] Download/classify the Zenodo dataset - see
+  the DONE entry below: the n=8 rerun finished (confirmed 18,656) and
+  classifying our own from-scratch 1,730,280 solutions already produced
+  an exact, zero-discrepancy reconciliation with Parker's numbers, so
+  this extra 178.8MB independent-dataset cross-check turned out not to
+  be needed to settle anything further.
+
+- [DONE, 2026-09-25] Once our own 45x45 search was fully exhaustively
+  complete (all 52,835 ranges done/split/historical, zero remaining -
+  see below), classified every one of the 1,730,280 found solutions
+  into L/I/other, resolving this completely - not just close, an exact
+  reconciliation with zero remaining discrepancy:
+  - Built tools/classify_li_other.py, reusing rotate_priority.py's
+    already-verified reconstruct_pieces(). Rule: L = two adjacent edge
+    bands present (5+4 tiles, forced, uses all nine 9x9s) among the
+    nine 9x9 tile positions; I = exactly one edge band present; other =
+    none. Result: L=74,624 (exact match to the 4x18,656 math - a
+    built-in correctness check that passed exactly), I=1,299,744,
+    other=355,912.
+  - The L match confirms the earlier label-swap hypothesis outright:
+    74,624 is exactly what Parker's video calls "other". Comparing our
+    I/other against his swap-corrected numbers (I=1,303,584,
+    other=352,072) left a gap of exactly 3,840 in both, in opposite
+    directions - too precise to be noise.
+  - Ran that gap down directly: rescanned every one of our
+    355,912 "other" solutions for a straight line of five 9x9 tiles
+    anywhere along a row or column, not just flush against the board's
+    edge (the exact ambiguity Darryl noted from the video: "not clear
+    if a column in the interior would also count"). Found exactly
+    3,840 such solutions (confirmed with real examples - e.g. nine-tile
+    positions including a clean horizontal line at y=20, dead center
+    of the board, nowhere near an edge).
+  - Final, fully reconciled result (zero remaining discrepancy):
+      L:     74,624  (4.313%)
+      I:  1,303,584  (75.339%) = 1,299,744 edge-flush + 3,840 interior
+      other: 352,072  (20.348%)
+    Matt Parker's video swapped the "L" and "other" labels, and his
+    "I" includes any full-width/height line of five 9x9 tiles anywhere
+    on the board, not only ones touching an edge. Written up in
+    Claude/RESULTS.txt.
+  Zenodo dataset cross-check (comparing against Scroggs' precomputed
+  1.73M solutions independently) was NOT pursued in the end - the
+  three-way exact reconciliation above (our math, our from-scratch
+  search, and Parker's own numbers once corrected) already left no
+  discrepancy to resolve, so the extra 178.8MB download+classification
+  effort wasn't needed to settle anything further.
+
+- [TODO] Darryl's question (relayed 2026-09-23): are there any
+  solutions shaped like a serif "I" - a column of five 9x9 tiles
+  centered in the 45x45 frame (columns 18-26, all 45 rows), plus
+  "serifs": one more 9x9 tile at each of the four places immediately
+  left/right of the column's top and bottom ends (columns 9-17 and
+  27-35, rows 0-8 and rows 36-44) - using all nine 9x9 tiles between
+  the stem (5) and the four serifs (4). The conjecture (from this
+  conversation, not yet verified): the leftover region - the two full-
+  height 9-wide side wings (columns 0-8 and 36-44) plus the two
+  9-wide-by-27-tall middle strips between the serifs (columns 9-17 and
+  27-35, rows 9-35) - can't actually be fully packed by a complete set
+  of tiles sized 1-8 (all nine 9x9s are already spoken for, so no size-
+  9 tile is available to help), forcing at least one unfillable 9x9-
+  shaped gap somewhere in that leftover shape.
+  NOTE: this geometry is my best reconstruction of the description,
+  not confirmed with Darryl directly - worth double-checking the exact
+  serif placement/size before implementing anything.
+  This is a small, fast, self-contained thing to actually test
+  whenever picked up (not necessarily tied to the big search at all):
+  write a one-off script/solver that pre-places exactly this fixed
+  9-tile arrangement on a blank 45x45 grid, then runs the same
+  raster+largest-first backtracking search as the other solvers
+  (reusing rangesolver.cpp's Grid/PieceSet logic is easiest) restricted
+  to tiles 1-8 only, to see whether the remaining area can be
+  completed at all - only 36 tiles to place into a 1296-area region,
+  should resolve in well under a second either way, proving or
+  disproving the conjecture directly instead of reasoning about it by
+  hand.
+
+  [ANSWERED, 2026-09-23] Darryl confirmed this geometry is what he
+  meant. Built the one-off solver as described (plain raster-order
+  backtracking, no MRV heuristic needed - it wasn't slow) - result:
+  NOT SOLVABLE, proven exhaustively (119,208 nodes explored in 0.1s,
+  every branch tried and failed). Setup double-checked first: the 9
+  fixed placements have no overlaps and leave exactly 1296 free cells,
+  matching sum(k^3, k=1..8)=1296 exactly, so the "no" isn't a
+  bookkeeping bug. Likely mechanism (not traced/confirmed - just the
+  standard explanation for this shape of failure, see the "no
+  isolates" dead-space check above): each of the two 9-wide side wings
+  can only avoid a 1-wide leftover sliver by using a specific
+  size-8-plus-ones trick, but only one 1x1 tile exists in the whole
+  puzzle, so at most one wing can pull it off - the other is stuck.
+  Not confirmed by actually tracing the failing branch; would be an
+  easy follow-up if ever wanted (print the deepest partial placement
+  reached, or count occurrences of each size in the parent stack at
+  the failure point).
+
+- [LOW PRIORITY, out of curiosity] Rotational-symmetry range prioritization
+  (idea floated 2026-09-24, while watching job #1's "99999" lineage and
+  its sibling "77788" turn out unusually bushy). Mechanism: rotating any
+  found 45x45 solution 90/180/270 degrees always produces another
+  genuinely distinct valid solution (no solution in this puzzle is
+  self-symmetric - see Danila P.'s comment referenced in the L/I/other
+  investigation above), living somewhere else in the search tree.
+  Standard axis-aligned-square rotation formulas give the rotated
+  piece list directly (for a piece at top-left (x,y) size sz in a
+  45-wide grid: 90 CW -> (45-sz-y, x), 180 -> (45-sz-x, 45-sz-y), 270
+  CW -> (y, 45-sz-x)); feed the rotated piece list through
+  solution.py's existing raster-sort + get_hash() to get its 45-digit
+  hash, then find which current ranges.db row (longest-prefix match
+  among 'unsearched' rows) will eventually discover it. Add a
+  `priority` column and change claim_range()'s capped query to `ORDER
+  BY priority DESC, range_start DESC` so pre-identified ranges get
+  claimed first (within the per-lineage cap), without disturbing
+  anything else about the ordering.
+  Important tradeoff (already correctly identified in conversation,
+  not a caveat added after the fact): this redirects work, it doesn't
+  reduce it. Every range still needs its own full exhaustive search
+  regardless of whether we already predicted one solution inside it -
+  so the ranges/hour (exhaustive-completion) ETA is untouched. What it
+  would do is make the aggregate solutions-found count climb faster,
+  by steering workers toward ranges known in advance to be non-empty
+  instead of the median backlog range, which finds nothing.
+  Deliberately deferred - solutions/sec is currently comfortably ahead
+  of the exhaustive-completion ETA, so there's no pressing need to
+  accelerate it further yet. Revisit once that velocity visibly slows
+  down as the currently-known "high bushiness" lineages (99999, 77788)
+  get exhausted and the aggregate rate starts leaning more on the
+  median-mostly-zero backlog - at that point this technique's ability
+  to keep discovering guaranteed-nonzero ranges could matter more.
+  Side benefit if ever built: deliberately steering toward broad
+  rotational coverage would also help the deferred L/I/other
+  classification work (cross-checking against Parker's numbers or the
+  Zenodo dataset) without waiting for full exhaustive completion.
+
+  [DONE, 2026-09-25] Implemented as tools/rotate_priority.py, ahead of
+  the "revisit once velocity slows" trigger above - built out of
+  curiosity per the low-priority framing, not because that trigger had
+  actually fired. Works entirely from solutions.db's already-
+  deduplicated 45-char hashes, no need to touch the raw ASCII logs:
+  reconstruct_pieces() replays the raster-scan placement process
+  (same per-row-bitmask technique as rangesolver.cpp's Grid) to
+  recover each piece's (x,y,sz) from a hash alone, rotate_pieces()
+  applies the rotation formulas above, and pieces_to_hash() re-derives
+  the rotated hash via the same raster-sort logic solution.py's
+  get_hash() uses. A prefix-set lookup (checking decreasing lengths of
+  the rotated hash against every currently-'unsearched' prefix, from
+  the current max depth down to 5) finds the matching still-open
+  range, since ranges are disjoint so at most one can ever match.
+  Verified before running live: 200 real known solutions round-tripped
+  exactly (reconstruct -> re-hash reproduces the original hash byte for
+  byte) and every reconstruction plus all 3 rotations validated as a
+  legal complete tiling (no overlaps, full 2025-cell coverage, correct
+  1-9 piece-count multiset); confirmed empirically across 500 more that
+  no solution is self-symmetric (matching Danila P.'s claim) and that
+  rotation composition is consistent (four 90s or two 180s return to
+  the original hash); a full synthetic ranges.db+solutions.db
+  integration test confirmed the right ranges get flagged and unrelated
+  ones don't, before ever touching the live database.
+  Added a `priority INTEGER NOT NULL DEFAULT 0` column (ranges.db
+  migrated live via ALTER TABLE; bootstrap_ranges.py's CREATE TABLE
+  updated too for future fresh databases) and changed both of
+  claim_range()'s unsearched-selecting queries to `ORDER BY priority
+  DESC, range_start DESC`.
+  Live run (2026-09-25): processed all 1,638,472 known solutions (~4.9M
+  rotations) in ~5 minutes, flagging 1,019 of the 21,191 then-remaining
+  unsearched ranges (~4.8%) as priority=1 - match count plateaued well
+  before the end (roughly 1019 by 1.2M solutions, unchanged through the
+  last 400K), suggesting most rotation-reachable ranges were found
+  early and later solutions increasingly rotate into already-
+  flagged/already-done territory.
+  Same restart caveat as every other worker.py change today: takes
+  effect only once running workers are relaunched, since Python doesn't
+  reload an already-running process's code from disk.
+  Not yet done: this was a one-shot run, not wired into anything
+  ongoing - newly-found solutions after this point won't generate new
+  priority flags unless rotate_priority.py is run again (it's safe to
+  re-run any time; already-flagged/no-longer-unsearched rows are
+  simply left alone or naturally excluded).
+
+  [DONE, 2026-09-25] Follow-up question that came up in conversation:
+  splitting a priority-flagged range does NOT propagate the flag to its
+  children (splitter.py's INSERT never sets priority, so children get
+  the column default of 0) - and this is correct, not a gap: a flag
+  means one specific known rotation lands somewhere in that range's
+  subtree, not uniformly across every child a split produces, so
+  blindly copying it forward would over-flag true siblings that were
+  never actually predicted to contain anything. The right fix is
+  re-running rotate_priority.py, which always recomputes fresh against
+  whatever's currently 'unsearched' (including brand-new child
+  prefixes) and correctly re-finds the one specific child that matches.
+  Wired this in as splitter.py's maybe_refresh_priority(), called once
+  per its normal scan cycle: if the priority pool has run dry (no
+  'unsearched' range still flagged priority>0) AND the known-solution
+  count has grown since rotate_priority.py's own last full run
+  (tracked via a small state file, tools/.rotate_priority_state,
+  written by rotate_priority.py itself after each non-dry-run/
+  unlimited run) AND no instance is already running (checked via ps,
+  same technique as dashboard.list_running_rangesolvers()), launches
+  rotate_priority.py in the background (non-blocking - splitter.py's
+  own age-based split scanning is never held hostage by a ~5-minute
+  side task). The "only if solution count grew" condition specifically
+  prevents a re-run-every-5-minutes-forever treadmill once rotation-
+  reachable ranges have genuinely been exhausted.
+  Verified with mocked side effects (no real subprocess spawned during
+  testing) across all 4 branches: pool non-empty short-circuits before
+  even checking counts, pool empty but no new solutions is a no-op,
+  pool empty with new solutions correctly launches a background run,
+  and an already-running instance correctly blocks an overlapping
+  second launch.
+  Same restart caveat as everything else today - needs splitter.py
+  relaunched to pick this up.
+
+- [LOW PRIORITY, out of curiosity] Related: a lineage "bushiness"
+  survey (2026-09-24), to find other lineages like 99999/77788 without
+  relying on stumbling onto them by eye while watching the dashboard,
+  and to know where the rotational-prioritization idea above would
+  actually pay off most once/if it's built. Group ranges.db by lineage
+  root (SUBSTR(prefix,1,5)) and, per root, report: descendant count,
+  max prefix depth reached (how many times it's needed splitting),
+  total solutions_found summed across its done+split+historical
+  descendants (see the historical-attribution fix below - 99999 has
+  one such row), and its current open/closed breakdown (how much of
+  it is still unsearched/in_progress vs. done/split). Rank by total
+  solutions_found
+  or by descendant count as a rough "bushiness" score - either should
+  surface 99999 and 77788 near the top, which would itself be a
+  reasonable sanity check that the survey's working before trusting it
+  to find others. Small standalone script/query, not tied to any
+  running process - could live as a one-off in tools/ or just be a
+  documented SQL recipe, whichever's less overhead when it's actually
+  picked up.
+
+- [DONE, 2026-09-24] Historical pre-bootstrap solution attribution.
+  After the 99999 lineage fully closed (177 ranges, all done/split),
+  its ranges.db total (306,006) was missing something: job #1 was
+  seeded from the original single-threaded solver's own historical
+  progress (see the "real-world evidence" note near the top of this
+  file), and that solver's own output - CppSolver/Solutions/
+  soln_log.txt, 12,255 solutions - was never attributed to any
+  ranges.db row, even though it's exactly the same lineage (verified:
+  all 12,255 have hash prefix "99999", none stray outside it) and
+  already counted in the global aggregate via solution_db.py's own
+  ingest of that file. Fixed by inserting one bookkeeping row: prefix/
+  range_start/range_end='99999', solutions_found=12255, log_file
+  pointing at the historical log - but with a NEW status,
+  'historical', rather than 'done'. Using 'done' would have corrupted
+  compute_range_completion_rate() in dashboard.py: that function's
+  MIN(finished_at) would jump back to the file's August timestamp,
+  vastly inflating the computed time-span and tanking the ranges/hour
+  ETA. 'historical' rows are counted in fetch_summary()'s "tracked"
+  solutions sum (dashboard.py updated to include it) but fall outside
+  every rate/remaining query (they only ever check for 'done'/'split'
+  or 'unsearched'/'in_progress'/'held_for_split'), so they're
+  automatically excluded from both ETAs with no extra filtering code
+  needed. Corrected 99999 lineage total: 318,261 (94% -> 97.6% of the
+  325,896 "I"-hypothesis prediction). Worth checking whether any other
+  lineage has a similar pre-bootstrap gap - unlikely, since 99999 was
+  the only range seeded from a resumed historical position rather than
+  a fresh --enumerate-depth prefix, but not verified.
+
+- LAN remote workers (idea floated 2026-09-24, prompted by a Raspberry
+  Pi cluster on hand - but see below, two laptops on hand are likely a
+  better first target). Naively pointing a remote machine's worker.py
+  at the same ranges.db over a network filesystem (NFS/SMB) is NOT
+  safe - SQLite's own documentation warns that file locking is
+  unreliable over network filesystem protocols, which is exactly the
+  kind of problem this project already hit and fixed once today for
+  purely LOCAL multi-process contention (the "database is locked"
+  crash + retry-with-backoff fix above) - doing that over a flaky
+  network lock implementation instead would be worse, not better.
+  Clean approach instead: keep ranges.db and all claim/release/split
+  coordination exactly where it is, local to the main machine - only
+  change WHERE the actual CPU-heavy rangesolver process executes.
+  - Add a remote-launch mode to worker.py: instead of a local
+    subprocess.Popen([RANGESOLVER, ...]), launch rangesolver over SSH
+    (`ssh host rangesolver --start=... --end=... --log=...
+    --status=scroll`) - SSH forwards remote stdout back through the
+    same pipe a local subprocess would use, so run_range()'s existing
+    PROGRESS_RE/DONE_RE parsing needs zero changes. Requires sshd
+    running on each laptop (key-based auth, not password, since
+    worker.py invokes ssh programmatically and often) - the main
+    machine connects outward to each laptop, not the reverse.
+  - The laptops will likely be on WiFi, so relying on a DHCP-assigned
+    IP is fragile - use mDNS (.local) hostnames instead (Bonjour;
+    Avahi is the Linux implementation). Confirmed 2026-09-24: this main
+    machine already has everything needed (avahi-daemon active,
+    libnss-mdns installed, mdns4_minimal already in /etc/nsswitch.conf)
+    with zero changes required on this end. Most desktop Linux distros
+    ship Avahi enabled by default too (Ubuntu, Pop!_OS, Fedora), so the
+    laptops may need no setup at all beyond confirming
+    `systemctl is-active avahi-daemon` and giving each a clear
+    hostname - then `ssh <hostname>.local` should just work without
+    ever tracking IP addresses.
+  - Mount Claude/Solutions/ on the remote machine (NFS or SSHFS) so
+    the remote rangesolver writes its log file directly into the
+    shared directory - no separate copy-back step needed, and since
+    each process only ever appends to its own uniquely-named file
+    (never concurrently shared), this doesn't have the same
+    reliability problem running SQLite itself over a network
+    filesystem would.
+  - One remote-mode worker.py instance per available remote CPU core,
+    still running locally on the main machine (lightweight - mostly
+    blocked on the SSH pipe, not actually computing) and each SSHing
+    into a specific remote host/core.
+  - rangesolver needs building for whatever architecture the remote
+    machine uses - native compilation on the remote machine itself is
+    simplest (so -march=native picks up whatever that specific CPU
+    supports), rather than cross-compiling.
+  Try the two laptops before the Pi cluster: modern laptop CPUs should
+  be much closer to (or could even exceed) the main machine's
+  i7-5930K per-core, whereas a Raspberry Pi's ARM cores are likely
+  somewhere around 1/6-1/10 the per-core throughput for this kind of
+  tight branchy integer workload - real, but a much smaller
+  contribution per core, and the Pi cluster adds ARM cross-
+  architecture building on top. The two laptops on hand (2026-09-24):
+  a Framework laptop (15", model not fully confirmed) and a System76
+  laptop - both vendors ship x86 (Intel/AMD), so the existing
+  rangesolver build should just work with no porting at all - worth
+  confirming exact CPUs before investing in the SSH/mount
+  plumbing, since that part is the same regardless of which remote
+  hardware ends up using it.
+
+  [DONE, 2026-09-25] First laptop (System76, hostname "wheeljack",
+  11th Gen i7-1165G7, 4C/8T @ 2.8GHz base / 4.7GHz boost, Ubuntu 24.04)
+  fully set up and verified working end-to-end against the live
+  system - the Framework laptop hasn't been done yet, but should be
+  the same recipe. What actually happened, including two gotchas the
+  plan above didn't anticipate:
+  - mDNS resolution turned out NOT to be symmetric on this network:
+    main -> wheeljack.local resolved fine with zero setup (matching
+    the plan), but wheeljack -> starscream.local failed outright, even
+    with matching avahi-daemon/libnss-mdns/nsswitch.conf config on both
+    ends. Root cause (inferred, not confirmed): this network has Google
+    Nest Wifi mesh points, and consumer mesh systems commonly restrict
+    multicast relay between WiFi and wired segments (client isolation),
+    which would explain resolution working one direction and not the
+    other. Worked around with a static /etc/hosts entry on the laptop
+    (main machine's current DHCP-assigned IP, 192.168.86.34) rather
+    than chasing the mesh's actual relay configuration - reintroduces
+    the exact IP-staleness risk mDNS was meant to avoid, so a real fix
+    (a DHCP reservation for this machine in the Nest Wifi app, or
+    figuring out the mesh's mDNS relay settings) is still worth doing
+    later. Only needed in this one direction - wheeljack.local itself
+    resolves fine from anywhere without any workaround.
+  - Two SSH keypairs needed, one per direction, both password-less
+    (non-interactive use): ~/.ssh/partridge_worker_ed25519 on the main
+    machine (main -> laptop, for launching rangesolver) and
+    ~/.ssh/partridge_mount_ed25519 generated directly on the laptop,
+    private key never leaving it (laptop -> main, for the SSHFS mount
+    only). Both installed via each side's authorized_keys.
+  Mount: sshfs on the laptop, mounting main:Claude/Solutions onto
+  ~/partridge_remote/Solutions with -o reconnect,ServerAliveInterval=15
+  ,ServerAliveCountMax=3 for resilience against the WiFi link dropping
+  briefly. Verified writes through the mount land correctly on the
+  main machine's real filesystem (a transient stale directory-listing
+  artifact was observed right after a delete-via-the-real-path - not
+  through the mount itself - but resolved itself immediately on a
+  fresh stat/read; doesn't affect rangesolver, which only ever appends
+  to files it created itself, never lists directories).
+  Build: rangesolver.cpp + Makefile copied over via scp, built natively
+  with `make` (the existing Makefile's own comment already anticipated
+  this exact scenario: "-march=native tunes for the machine doing the
+  build ... each machine builds its own binary locally").
+  Measured real sustained-load behavior before deciding on a thread
+  count (see "how many threads" discussion) - loaded all 8 logical
+  threads and separately 4, sampling /sys/.../scaling_cur_freq and
+  thermal zones every 5s for ~40-45s each: cores settled around
+  1.0-1.6GHz under sustained load, far below both the 2.8GHz base and
+  4.7GHz boost spec, while temps stayed comfortably low (38-45C, nowhere
+  near thermal-throttle range) - a power-limit throttle, not a thermal
+  one, typical of thin ultraportables configured for a sustained power
+  budget well below what full-load-on-all-cores would need to hold
+  base clock. Whether 4 or 8 threads gives more real aggregate
+  throughput wasn't conclusively measured (frequency alone doesn't
+  settle it, since hyperthreading's resource-sharing overhead is a
+  separate factor from the power-budget question) - started
+  conservatively with 4 (one per physical core) rather than 8; revisit
+  with an actual nodes-explored/solutions-found comparison if squeezing
+  more out of this laptop specifically ever matters.
+  worker.py changes: added --remote-host/--remote-dir/--ssh-key args;
+  when --remote-host is set, run_range() wraps the same solver_args in
+  an `ssh -i <key> -o BatchMode=yes <host> "cd <remote-dir> &&
+  ./rangesolver ..."` command instead of a local subprocess.Popen -
+  everything else (PROGRESS_RE/DONE_RE parsing, set_log_file, the
+  whole claim/release/finish bookkeeping) needed zero changes, since
+  SSH forwards the remote process's stdout live through the same pipe
+  a local subprocess would use (verified: progress lines arrived at
+  real ~3s intervals over SSH, not buffered until exit) and the SSHFS
+  mount means the log file already lands in the right place with no
+  extra step.
+  End-to-end verified against the live system, not just standalone:
+  launched a real `worker.py --remote-host=wheeljack.local`, watched it
+  claim a genuine unsearched range, run it on the laptop, find real
+  solutions, and finish cleanly; then deliberately killed it mid-range
+  to confirm interruption handling - confirmed the remote rangesolver
+  process was actually terminated (nothing left running on the laptop
+  afterward, checked via pgrep) rather than orphaned, since killing the
+  local ssh client drops the connection and the remote sshd sends
+  SIGHUP to the still-attached remote process (rangesolver.cpp has no
+  signal handling, so it just dies, same as any other interruption).
+  The interrupted range was correctly released and picked up by an
+  already-running local worker, which finished it from the resumed
+  position - incidentally reconfirming a pre-existing, unrelated
+  characteristic of the whole system while testing this: a range's
+  solutions_found column only reflects the last completing run's own
+  count, not the cumulative total across a resume (the log file itself
+  had 25 solutions; solutions_found recorded only 3, the count from the
+  resume point onward) - already why solution_db.py's independent log-
+  scanning is the authoritative source, not this column; not a bug
+  introduced by remote workers, just re-verified by testing them.
+  Started with 4 worker.py --remote-host=wheeljack.local instances,
+  each in its own terminal window matching the existing local-worker
+  convention.
+
+  After the laptops: a Windows 11 desktop is also being considered.
+  If it has WSL2 available, that's almost certainly the path of least
+  resistance - a real Linux environment where rangesolver.cpp compiles
+  and runs completely unmodified, and normal SSH/SSHFS tooling works
+  exactly as it would on the laptops, turning "add a Windows machine"
+  into "just another Linux box" for this purpose. Without WSL2, a
+  native Windows port would be real (if moderate) extra work:
+  rangesolver.cpp uses POSIX-only headers (<unistd.h>, isatty(fileno
+  (stdout))) that would need Windows equivalents (<io.h>'s _isatty(
+  _fileno(stdout))) and a build via MSVC or MinGW, plus Windows 11
+  does ship an OpenSSH Server as an optional feature (so SSH itself
+  isn't the blocker) but would need SMB or SSHFS-Win for the shared
+  Solutions directory instead of native NFS. Worth checking for WSL2
+  first before considering the native-port path at all.
+
+  Third option, worth considering BEFORE either WSL2 or a native
+  Windows port (2026-09-24): a browser-based WASM worker instead. Run
+  a small HTTP server on the main Linux box that hands out --start/
+  --end assignments and accepts reported results/progress over a
+  simple API; compile the portable core search logic (Grid, PieceSet,
+  full_solver - no OS dependencies, and __builtin_ctzll maps cleanly to
+  WASM's native i64.ctz via Emscripten) to WASM; run it in a Web Worker
+  (to avoid background-tab throttling) on whatever machine opens the
+  page. Only the driver code (currently file I/O, CLI args, stdout
+  progress-printing) would need to change, to periodically POST
+  progress/results over HTTP instead of writing a local log file.
+  Tradeoff versus the SSH-based approach above: zero remote-side setup
+  at all (no SSH, no native port, no shared mount - just open a URL in
+  any browser, on any OS/architecture), at the cost of real new
+  server+client code (there's no shared filesystem to lean on anymore)
+  and a likely (unverified) performance hit versus a native build,
+  maybe in the 20-50% range for this kind of tight branchy integer
+  workload. Also generalizes well past just this one Windows machine -
+  effectively turns "any device with a browser" into a potential
+  worker, reviving the old "browser-based client" idea from earlier in
+  this file.
+  Sequencing: for the two Linux laptops, the plain SSH/native-build
+  path above is almost certainly still the easier and faster route -
+  no porting or new server needed at all, since they're already a
+  natively-compatible environment. The WASM path earns its keep
+  specifically where native setup is the more awkward option, i.e. for
+  the Windows machine - worth trying before investing in either WSL2
+  or a native Windows port.
+
+- [DONE, 2026-09-30] Report our findings back to Matt Parker and/or Matthew Scroggs:
+  our exhaustive search independently confirms Parker's cited 1,730,280
+  total exactly, and separately, our own classification of the complete
+  solution set resolves a discrepancy in the video's L/I/other breakdown -
+  the "L" and "other" labels appear swapped (352,072 and 74,624 are stated
+  backwards relative to what the geometry he describes actually produces),
+  and "I" turns out to include a five-9x9 line anywhere on the board, not
+  only ones flush against an edge (the exact ambiguity he flagged in the
+  video - "not clear if a column in the interior would also count" -
+  resolved: yes, it counts). Full writeup already in Claude/RESULTS.txt;
+  this task is just about actually sending/posting it somewhere, not
+  further investigation.
+  Contact info found (2026-09-26):
+  - Matthew Scroggs - likely the more promising channel: he's a working
+    mathematician who already wrote independent analysis on this exact
+    puzzle (mscroggs.co.uk/blog/119) and explicitly invites contact.
+    Confirmed directly from his own /contact page: email at
+    contact@mscroggs.co.uk, or - his own first-listed suggestion -
+    commenting directly on that blog post, which is exactly on-topic here.
+  - Matt Parker - standupmaths.com/youtube/ lists a contact email for
+    video-related matters, but it's Cloudflare-obfuscated (rendered via
+    JS to block scrapers) - couldn't extract the actual address through a
+    page fetch; open that page directly in a browser to reveal it. His
+    channel is large enough that email/comments often route through
+    assistants - a YouTube comment on the video itself is a reasonable
+    public/passive supplementary note, but probably not the primary
+    channel to rely on.
+  Posted (2026-09-30): shared the category numbers as a comment on
+  Matthew Scroggs' blog post (mscroggs.co.uk/blog/119) - his own
+  first-listed preferred contact method. Worth checking back on that post
+  for a reply, and still open whether to also reach Parker directly.
