@@ -17,7 +17,8 @@ that one is everything that drives it.
 
 ## Results
 
-The full search is complete: **1,730,280 unique solutions**, an exact
+The full search is complete: **1,730,280 unique solutions** (216,285 if
+rotations and reflections of the same tiling are counted once), an exact
 match to the figure Matt Parker cites in ["The impossible puzzle with over
 a million solutions!"](https://youtu.be/eqyuQZHfNPQ). See
 [`RESULTS.txt`](RESULTS.txt) for the full write-up, including:
